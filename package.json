@@ -1,0 +1,14 @@
+{
+  "name": "bilibili-cloud-replay",
+  "version": "0.7.2",
+  "private": true,
+  "description": "Bilibili cloud replay clipping userscript with explicit publication confirmation",
+  "license": "UNLICENSED",
+  "scripts": {
+    "check": "node --check bilibili-cloud-replay.user.js",
+    "test": "node --test tests/core.test.cjs"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

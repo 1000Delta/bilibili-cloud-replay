@@ -1,0 +1,10 @@
+# Only reviewed public source and documentation belong in this repository.
+*
+!.gitignore
+!.gitattributes
+!README.md
+!SECURITY.md
+!package.json
+!bilibili-cloud-replay.user.js
+!tests/
+!tests/core.test.cjs
