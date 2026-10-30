@@ -47,6 +47,10 @@
     "minute filter visible",
     "user search filters list",
     "apply closes editor with revised draft",
-    "cut editor performs no publication or manuscript writes"
+    "cut editor performs no publication or manuscript writes",
+    "two maximum-length neighbours can drag right",
+    "oversized draft is marked and cannot apply",
+    "same boundary can move left; opposite oversized side remains blocked",
+    "splitting oversized neighbour restores apply"
   ]
 }
