@@ -521,6 +521,18 @@
     }
     endReview(session) {if(this.reviewSession===session)this.reviewSession=null;}
     reviewCurrent(plan,key) {return this.reviewSession?.plan===plan&&this.reviewSession.keys.has(key);}
+    async boundaryFrame(token,liveKey,boundary) {
+      const plan=this.snapshot,session=plan?.sessions.find(s=>s.liveKey===liveKey);
+      assert(session&&plan.token===token&&this.scannedAccount()===plan.uid,'计划或账号已改变');
+      assert(this.env.now()-plan.created<900||this.reviewSession?.plan===plan,'计划已过期，请重新扫描');
+      assert(Number.isInteger(boundary),'分界时间无效');
+      // End-exclusive ranges: at a gap/end boundary show the final available second.
+      const range=session.ranges?.find(([a,b])=>boundary>=a&&boundary<b)||session.ranges?.find(([,b])=>boundary===b);
+      assert(range,'分界不在可用录像范围内');const ts=Math.min(boundary,range[1]-1),csrf=this.env.csrf();assert(/^[0-9a-f]{32}$/i.test(csrf),'未取得有效CSRF，请检查登录状态');
+      const data=await this.call('frames',{live_key:liveKey,time_list:String(ts),csrf},'POST');
+      assert(this.snapshot===plan&&this.scannedAccount()===plan.uid,'计划或账号已改变');
+      return {...frameSelection({start:range[0],end:range[1]},data,ts),boundary};
+    }
     async randomCover(key,previous,restoreTimestamp) {
       const plan=this.snapshot,clip=plan?.clips.find(c=>c.key===key);
       assert(clip&&(!clip.blocked||this.reviewCurrent(plan,key)&&['rejected','remote_failed'].includes(clip.state)),'片段不可用，请重新扫描');assert(this.reviewCurrent(plan,key)||this.env.now()-plan.created<900,'计划已超过15分钟，请重新扫描');
@@ -1085,6 +1097,24 @@
     const notice=el('p','','notice'),segments=el('div',undefined,'segments'),bar=el('div',undefined,'bar'),hover=el('p','时轴按分钟聚集弹幕，悬停查看摘要，点击筛选该分钟。','note');
     const timeline=el('section',undefined,'timeline-panel'),axisScroll=el('div',undefined,'axis-scroll'),axisCanvas=el('div',undefined,'axis-canvas'),axis=el('div',undefined,'cut-axis');
     const timelineHeader=el('div',undefined,'timeline-header');timelineHeader.append(el('strong','剪辑时间轴'),el('span','拖动分界 · 相邻两段同步调整','note'));const zoom=el('select');zoom.setAttribute('aria-label','时间轴缩放');for(const n of [1,2,4,8]){const option=el('option',n+'×');option.value=n;zoom.append(option);}zoom.onchange=()=>{axisCanvas.style.width=(Number(zoom.value)*100)+'%';};timelineHeader.append(zoom);axisCanvas.append(axis,bar);axisScroll.append(axisCanvas);timeline.append(timelineHeader,axisScroll,hover);
+    const framePanel=el('div',undefined,'frame-panel'),frameImage=el('div',undefined,'frame-image'),frameInfo=el('div'),frameTitle=el('strong','分界关键帧'),frameStatus=el('p','悬停或选中分界手柄查看画面；拖动停下后自动更新。','note');frameStatus.setAttribute('role','status');
+    let frameVersion=0,frameTimer=null,framePending=null,frameLoading=false,frameTime=null;const frameCache=new Map();
+    const frameRetry=button('重新读取截图',()=>{if(frameTime!==null){frameCache.delete(frameTime);previewFrame(frameTime);}},frameInfo);frameRetry.disabled=true;frameInfo.prepend(frameTitle,frameStatus);framePanel.append(frameImage,frameInfo);timeline.append(framePanel);
+    style.textContent+=`.frame-panel{display:flex;gap:16px;align-items:center;background:#f5f8fc;border:1px solid #e3eaf2;border-radius:10px;padding:12px;margin:12px 0 4px}.frame-image{width:240px;aspect-ratio:16/9;background:#e5edf5;border-radius:7px;overflow:hidden;flex-shrink:0;display:grid;place-items:center;color:#8196aa}.frame-image:empty:after{content:'关键帧预览'}.frame-image img{width:100%;height:100%;object-fit:contain}.frame-panel p{max-width:420px;margin:6px 0}.frame-panel strong{font-variant-numeric:tabular-nums}@media(max-width:600px){.frame-panel{align-items:stretch;flex-direction:column}.frame-image{width:100%}}`;
+    function clearFrames(){clearTimeout(frameTimer);frameVersion++;framePending=null;frameCache.clear();}
+    function previewFrame(ts){
+      if(closed)return;frameTime=ts;const version=++frameVersion;clearTimeout(frameTimer);framePending={ts,version,ready:false};frameRetry.disabled=false;frameImage.replaceChildren();frameTitle.textContent='分界 · '+cutClock(ts-session.start);frameStatus.textContent='等待停下后读取此时间附近的关键帧…';
+      frameTimer=setTimeout(()=>{if(closed||version!==frameVersion)return;framePending.ready=true;void readFrame();},350);
+    }
+    async function readFrame(){
+      if(closed||frameLoading||!framePending?.ready)return;const {ts,version}=framePending;framePending=null;frameLoading=true;
+      try{let result=frameCache.get(ts);if(!result){result=await engine.boundaryFrame(snapshot.token,liveKey,ts);if(closed)return;frameCache.set(ts,result);if(frameCache.size>32)frameCache.delete(frameCache.keys().next().value);}
+        if(closed||version!==frameVersion)return;frameStatus.textContent='正在加载截图…';const img=el('img');img.alt='分界 '+cutClock(ts-session.start)+' 附近的关键帧';img.referrerPolicy='no-referrer';
+        img.onload=()=>{if(!closed&&version===frameVersion)frameStatus.textContent='关键帧时间 '+cutClock(result.ts-session.start)+(result.requested!==ts?'（结束边界使用前一秒）':'')+'。用于定位，不会修改投稿封面。';};
+        img.onerror=()=>{if(!closed&&version===frameVersion){frameCache.delete(ts);frameImage.replaceChildren();frameStatus.textContent='截图加载失败，请点击重新读取截图。';}};frameImage.replaceChildren(img);img.src=result.url;
+      }catch(e){if(!closed&&version===frameVersion){frameImage.replaceChildren();frameStatus.textContent='读取失败：'+e.message+'。可重新读取截图。';}}
+      finally{frameLoading=false;if(!closed&&framePending?.ready)void readFrame();}
+    }
     const controls=el('div',undefined,'row'),read=button('读取本场弹幕',async()=>{if(busy)return;busy=true;read.disabled=true;notice.textContent='正在读取弹幕…';try{const result=await engine.danmaku(liveKey,snapshot.token);if(closed)return;rows=result.rows;confirmed.checked=false;page=0;minute=null;notice.textContent=`读取 ${rows.length} 条，跳过 ${result.skipped} 条。请核对 ASS 时间零点后勾选校准确认；缺失用户名显示“未提供”。`;drawDanmaku();}catch(e){if(!closed)notice.textContent=e.message;}finally{busy=false;read.disabled=false;}},controls);
     const file=el('input');file.type='file';file.accept='.ass,.ssa';file.setAttribute('aria-label','导入 ASS 弹幕文件');file.onchange=async()=>{const f=file.files[0];if(!f)return;try{assert(f.size<=8*1024*1024,'文件超过 8 MiB');const result=parseDanmakuASS(await f.text());if(closed)return;rows=result.rows;confirmed.checked=false;page=0;minute=null;notice.textContent=`导入 ${rows.length} 条，跳过 ${result.skipped} 条；请核对时间零点。`;drawDanmaku();}catch(e){notice.textContent=e.message;}};controls.append(file);
     const calibration=el('div',undefined,'row'),origin=el('input');origin.type='number';origin.step='1';origin.value='0';origin.style.width='100px';origin.setAttribute('aria-label','ASS 零点相对开播秒数');const originLabel=el('label','ASS 零点相对开播（秒，可为负）：');originLabel.append(origin);const confirmed=el('input');confirmed.type='checkbox';const confirmLabel=el('label',' 已核对弹幕与录像的时间对应');confirmLabel.prepend(confirmed);calibration.append(originLabel,confirmLabel);
@@ -1119,7 +1149,7 @@
       const bounds=boundary(index,field);if(clamp)n=Math.max(bounds.min,Math.min(bounds.max,n));
       assert(Number.isInteger(n)&&n>=bounds.min&&n<=bounds.max,'分界超出可用范围或片段过短');
       const next=cuts.map(c=>({...c}));next[index][field]=n;if(bounds.linked)next[bounds.adjIndex][bounds.other]=n;
-      validateCuts(session,next,true);cuts=next;return n;
+      validateCuts(session,next,true);cuts=next;previewFrame(n);return n;
     }
     function drawAxis(){
       axis.replaceChildren();const length=session.end-session.start;
@@ -1127,6 +1157,7 @@
       cuts.forEach((c,index)=>{const band=el('div',`${String(index+1).padStart(2,'0')} · ${c.topic}`,'cut-band');band.dataset.index=index;band.style.setProperty('--hue',String(195+index%4*18));axis.append(band);});
       const handles=[];cuts.forEach((c,index)=>{if(!index||cuts[index-1].end!==c.start)handles.push([index,'start']);handles.push([index,'end']);});
       for(const [index,field]of handles){const limits=boundary(index,field),shared=limits.linked,h=el('button','⋮','boundary');h.type='button';h.setAttribute('role','slider');h.dataset.index=index;h.dataset.field=field;h.setAttribute('aria-label',shared?`片段 ${index+1} 与 ${limits.adjIndex+1} 的分界`:`片段 ${index+1} ${field==='start'?'起点':'终点'}`);h.setAttribute('aria-valuemin',String(limits.min-session.start));h.setAttribute('aria-valuemax',String(limits.max-session.start));const tip=el('span','','boundary-time');h.append(tip);axis.append(h);
+        h.onmouseenter=h.onfocus=()=>previewFrame(cuts[index][field]);
         const finish=()=>{drawCuts();axis.querySelector(`[data-index="${index}"][data-field="${field}"]`)?.focus({preventScroll:true});};
         h.onkeydown=e=>{let n=cuts[index][field],step=e.shiftKey?10:1;if(['ArrowLeft','ArrowDown'].includes(e.key))n-=step;else if(['ArrowRight','ArrowUp'].includes(e.key))n+=step;else if(e.key==='Home')n=boundary(index,field).min;else if(e.key==='End')n=boundary(index,field).max;else return;e.preventDefault();moveBoundary(index,field,n,true);finish();};
         h.onpointerdown=e=>{if(e.button!==0||busy)return;e.preventDefault();const initial=cuts.map(c=>({...c})),rect=axis.getBoundingClientRect(),pointer=e.pointerId;h.focus({preventScroll:true});try{h.setPointerCapture(pointer);}catch(_){}h.classList.add('dragging');
@@ -1150,7 +1181,7 @@
         const remove=button('移除此段',()=>{cuts.splice(index,1);drawCuts();},box);remove.disabled=cuts.length===1;segments.append(box);
       });const long=cuts.filter(c=>c.end-c.start>CHUNK);apply.disabled=busy||long.length>0;apply.title=long.length?'请先拆分标红的超长片段':'';if(redraw){drawAxis();drawDanmaku();}
     }
-    const actions=el('div',undefined,'row');const close=()=>{if(busy){notice.textContent='正在读取或应用，请稍后关闭。';return;}closed=true;layer.remove();timingLayer=null;cancelTiming=null;};cancelTiming=()=>{closed=true;layer.remove();timingLayer=null;cancelTiming=null;};
+    const actions=el('div',undefined,'row');const close=()=>{if(busy){notice.textContent='正在读取或应用，请稍后关闭。';return;}closed=true;clearFrames();layer.remove();timingLayer=null;cancelTiming=null;};cancelTiming=()=>{closed=true;clearFrames();layer.remove();timingLayer=null;cancelTiming=null;};
     button('取消调整',close,actions);button('重置本次调整',()=>{cuts=original.map(c=>({start:c.start,end:c.end,topic:c.topic}));drawCuts();},actions);
     const apply=button('应用分段并重新确认投稿',async()=>{if(busy||closed)return;busy=true;apply.disabled=true;try{const result=await engine.reviseCuts(snapshot.token,original.map(c=>c.key),liveKey,cuts);if(closed)return;busy=false;close();onApplied(result);}catch(e){notice.textContent=e.message;}finally{busy=false;apply.disabled=false;}},actions);apply.className='primary';
     actions.classList.add('sticky-actions');dialog.append(heading,intro,timeline,el('h4','片段详情'),segments,el('h4','弹幕素材'),controls,calibration,highlights,filter,list,pager,notice,actions);dialog.oncancel=e=>{e.preventDefault();close();};shadow.append(style,dialog);document.body.append(layer);drawCuts();drawDanmaku();dialog.showModal();

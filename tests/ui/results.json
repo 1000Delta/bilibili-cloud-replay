@@ -51,6 +51,12 @@
     "two maximum-length neighbours can drag right",
     "oversized draft is marked and cannot apply",
     "same boundary can move left; opposite oversized side remains blocked",
-    "splitting oversized neighbour restores apply"
+    "splitting oversized neighbour restores apply",
+    "hover requests a debounced boundary frame",
+    "frame reads stay serial during rapid movement",
+    "intermediate positions coalesced; latest frame requested",
+    "stale frame cannot replace latest selected time",
+    "failed image offers explicit retry",
+    "closing cancels queued preview"
   ]
 }
