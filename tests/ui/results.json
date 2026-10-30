@@ -1,0 +1,30 @@
+{
+  "passed": true,
+  "checks": [
+    "save disabled before preview",
+    "async UI operation finished",
+    "reading never posts",
+    "candidate initially unchecked",
+    "existing tags unchanged by recognition",
+    "selected tag appended",
+    "save enabled after preview",
+    "before-after preview visible",
+    "preview never posts",
+    "editing invalidates approval",
+    "async UI operation finished",
+    "confirmed UI saves target once",
+    "per-item readback result visible",
+    "async UI operation finished",
+    "repeat save is idempotent",
+    "history selection explicit; missing ID disabled",
+    "async UI operation finished",
+    "duplicate selected manuscripts deduplicated",
+    "async UI operation finished",
+    "batch rules and both manuscripts rendered",
+    "applying bulk prefix twice does not duplicate",
+    "bulk append derives from original",
+    "both before-after previews shown",
+    "async UI operation finished",
+    "batch confirmation writes each selected manuscript once"
+  ]
+}

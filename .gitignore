@@ -8,3 +8,9 @@
 !bilibili-cloud-replay.user.js
 !tests/
 !tests/core.test.cjs
+!LICENSE
+!tests/editing.test.cjs
+!tests/ui/
+!tests/ui/build.cjs
+!tests/ui/scenario.js
+!tests/ui/results.json
