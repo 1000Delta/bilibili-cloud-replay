@@ -14,3 +14,5 @@
 !tests/ui/build.cjs
 !tests/ui/scenario.js
 !tests/ui/results.json
+
+!tests/timing.test.cjs
