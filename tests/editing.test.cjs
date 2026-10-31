@@ -29,7 +29,42 @@ test('suggestions never change tags without an explicit operation',()=>{
 test('bulk transformations are based on original; payload preserves parts and other metadata',()=>{
  const d=fixture().remote['1'],op={find:'原',replace:'修改',prefix:'前',suffix:'后',descMode:'append',desc:'补充'},t=C.editTarget(d,op);
  assert.equal(t.title,'前修改题【候选】后');assert.equal(t.desc,'原简介\n补充');assert.deepEqual(C.editTarget(d,op),t);
- const body=C.editPayload(d,t,'a'.repeat(32));for(const k of ['videos','subtitle'])assert.deepEqual(body[k],d[k]);for(const k of ['cover','tid','extra'])assert.deepEqual(body[k],d.archive[k]);assert.equal(d.archive.title,'原题【候选】');
+ const body=C.editPayload(d,t,'a'.repeat(32));for(const k of ['videos','subtitle'])assert.deepEqual(body[k],d[k]);for(const k of ['cover','tid'])assert.deepEqual(body[k],d.archive[k]);assert.equal(body.extra,undefined);assert.equal(d.archive.title,'原题【候选】');
+});
+
+function creatorReadModel(){
+ const d=fixture().remote['1'];Object.assign(d.archive,{cover43:'https://i0.hdslb.com/bfs/archive/synthetic43.jpg',ai_cover:0,is_ab_cover:0,ab_cover_info:{mode:0,ab_covers:null},creation_statement:{id:-1},human_type2:{id:1008,name:'合成分区'},recreate:{auth:1,editable:1,switch:-1},dynamic:'',interactive:0,mission_id:0,is_only_self:0,no_reprint:0,is_360:-1,is_dolby:0,lossless_music:0,state:0,tp_info:{readOnly:true}});
+ d.space_hidden=2;d.subtitle={allow:false,lan:'',lan_doc:'',draft_list:null};d.watermark={id:0,mid:0,state:1,url:'',info:''};
+ Object.assign(d.videos[0],{duration:600,index:1,status:0,xcode_state:6});return d;
+}
+
+test('creator read model becomes web edit schema instead of forwarding read-only objects',()=>{
+ const d=creatorReadModel(),original=clone(d),target=C.editTarget(d,{title:'新主题',tags:['合成标签','补充']}),body=C.editPayload(d,target,'a'.repeat(32));
+ assert.deepEqual(body,{cover:d.archive.cover,title:'新主题',copyright:1,tid:1,tag:'合成标签,补充',desc:'原简介',
+  videos:[{filename:'synthetic-video',title:'分P标题',desc:'分P简介',cid:456}],aid:1,new_web_edit:1,handle_staff:false,topic_grey:1,web_os:1,
+  cover43:d.archive.cover43,ai_cover:0,is_ab_cover:0,creation_statement:{id:-1},dynamic:'',interactive:0,mission_id:0,is_only_self:0,no_reprint:0,is_360:-1,lossless_music:0,
+  human_type2:1008,recreate:-1,ab_cover_info:null,space_hidden:2,dolby:0,watermark:{state:1},subtitle:{open:0,lan:''},csrf:'a'.repeat(32)});
+ assert.deepEqual(d,original);assert(!('archive' in body));assert(!('state' in body));assert(!('tp_info' in body));assert(!('reply' in body));
+});
+
+test('edit mapping retains enabled settings, all video parts and unchanged rich descriptions',()=>{
+ const d=creatorReadModel();d.archive.human_type2=1008;d.archive.recreate=1;d.archive.is_ab_cover=1;d.archive.ab_cover_info={mode:1,ab_covers:['synthetic']};d.archive.is_dolby=1;d.archive.is_360=1;d.archive.lossless_music=1;d.archive.desc_v2=[{type:1,raw_text:'原简介'}];d.subtitle={allow:true,lan:'zh'};d.watermark.state=0;d.videos.push({filename:'synthetic-second',title:'第二P',desc:'',cid:789});
+ const body=C.editPayload(d,C.editTarget(d,{title:'新题'}),'a'.repeat(32));
+ assert.equal(body.human_type2,1008);assert.equal(body.recreate,1);assert.deepEqual(body.ab_cover_info,d.archive.ab_cover_info);assert.equal(body.is_360,1);assert.equal(body.dolby,1);assert.equal(body.lossless_music,1);assert.deepEqual(body.watermark,{state:0});assert.deepEqual(body.subtitle,{open:1,lan:'zh'});assert.deepEqual(body.desc_v2,d.archive.desc_v2);assert.equal(body.videos.length,2);assert.equal(body.videos[1].cid,789);
+});
+
+test('unrecognized object-shaped edit settings fail before sending instead of guessing defaults',async()=>{
+ for(const mutate of [d=>d.archive.human_type2={name:'缺少ID'},d=>d.archive.recreate={auth:1},d=>d.subtitle={lan:''},d=>d.watermark={state:9}]){
+  const f=fixture(),d=creatorReadModel();mutate(d);f.remote['1']=d;const p=await plan(f);assert.equal((await f.editor.execute(p.token,{confirmed:true}))[0].state,'failed');assert.equal(f.posts().length,0);
+ }
+});
+
+test('strict web edit endpoint accepts normalized creator fields and readback verifies changed title and tags',async()=>{
+ const f=fixture();f.remote['1']=creatorReadModel();const request=f.env.request;f.env.request=async(url,p,method,format)=>{
+  if(url===C.ROUTES.editManuscript){assert.equal(p.new_web_edit,1);assert.equal(p.human_type2,1008);assert.equal(p.recreate,-1);assert.deepEqual(p.subtitle,{open:0,lan:''});assert.deepEqual(p.watermark,{state:1});assert.equal(p.videos[0].status,undefined);}
+  return request(url,p,method,format);
+ };
+ const p=await plan(f,{'1':{title:'测试更新主题',addTags:['补充']}});assert.equal((await f.editor.execute(p.token,{confirmed:true}))[0].state,'verified');assert.equal(f.posts().length,1);assert.equal(f.remote['1'].archive.tag,'已有,保留,补充');
 });
 test('owner, ID, missing metadata, unavailable parts and rich descriptions fail closed',()=>{
  const d=fixture().remote['1'];for(const mutate of [x=>x.archive.mid=234,x=>x.archive.aid=3,x=>x.videos=[],x=>delete x.archive.tag,x=>delete x.videos[0].filename]){const bad=clone(d);mutate(bad);assert.throws(()=>C.manuscriptData(bad,{aid:'1'},'123'));}

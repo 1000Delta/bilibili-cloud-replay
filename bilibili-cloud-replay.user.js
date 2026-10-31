@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         B站云端回放分段助手（默认只读）
 // @namespace    local.bilibili.cloud-replay
-// @version      0.8.0
+// @version      0.8.1
 // @license      MIT
 // @description  缓存并后台发现已结束回放，卡片内多选投稿；同日同主题跨场次连续编号，预览随机帧封面后按钮确认提交。
 // @match        https://link.bilibili.com/*
@@ -775,10 +775,32 @@
   }
   function editPayload(data,target,csrf){
     assert(/^[0-9a-f]{32}$/i.test(csrf),'未取得有效CSRF');
-    // Preserve the complete returned archive and auxiliary options, including all parts.
-    const payload={...structuredClone(data),...structuredClone(data.archive),...target,csrf};
-    delete payload.archive;payload.videos=structuredClone(data.videos);
-    return payload;
+    // archive/view is a read model, not an edit request. In particular its category
+    // and recreate values are objects, and subtitle uses "allow" instead of "open".
+    const a=data.archive,body={cover:a.cover,title:target.title,copyright:a.copyright,tid:a.tid,tag:target.tag,desc:target.desc,
+      videos:data.videos.map(v=>({filename:v.filename,title:v.title,desc:v.desc||'',cid:v.cid})),
+      aid:a.aid,new_web_edit:1,handle_staff:false,topic_grey:1,web_os:1};
+    for(const key of ['cover43','ai_cover','is_ab_cover','creation_statement','dynamic','interactive','mission_id','is_only_self','no_reprint','is_360','lossless_music','source','dtime','desc_v2','dynamic_v2']){
+      if(a[key]!==undefined&&a[key]!==null)body[key]=structuredClone(a[key]);
+    }
+    if(a.human_type2!==undefined&&a.human_type2!==null){
+      const id=typeof a.human_type2==='object'?a.human_type2.id:a.human_type2;
+      assert(Number.isInteger(Number(id))&&Number(id)>0,'稿件内容分区无法识别，请在创作中心编辑');body.human_type2=Number(id);
+    }
+    if(a.recreate!==undefined&&a.recreate!==null){
+      const value=typeof a.recreate==='object'?a.recreate.switch:a.recreate;
+      assert(Number.isInteger(Number(value))&&value!==null&&value!==undefined,'稿件二创开关无法识别，请在创作中心编辑');body.recreate=Number(value);
+    }
+    if(a.is_ab_cover!==undefined)body.ab_cover_info=Number(a.is_ab_cover)?structuredClone(a.ab_cover_info):null;
+    if(data.space_hidden!==undefined)body.space_hidden=data.space_hidden;
+    if(a.is_dolby!==undefined||a.attrs?.is_dolby!==undefined)body.dolby=a.is_dolby??a.attrs.is_dolby;
+    if(data.watermark){assert([0,1].includes(Number(data.watermark.state)),'稿件水印设置无法识别');body.watermark={state:Number(data.watermark.state)};}
+    if(data.subtitle){
+      const open=data.subtitle.open??(typeof data.subtitle.allow==='boolean'?Number(data.subtitle.allow):undefined);
+      assert([0,1].includes(Number(open))&&open!==null&&open!==undefined,'稿件字幕设置无法识别');
+      body.subtitle={open:Number(open),lan:data.subtitle.lan||''};
+    }
+    return {...body,csrf};
   }
   const EDIT_LABEL={ready:'待确认',sending:'正在保存',verified:'已回读确认（审核状态另查）',accepted:'已受理，等待回读确认',unknown:'结果不明，禁止重发',rejected:'服务器拒绝，可重试固定目标',conflict:'数据已变化，请重新预览',failed:'发送前失败，可重试',cancelled:'已取消后续',unchanged:'没有变化'};
   class ManuscriptEditor {
@@ -913,7 +935,7 @@
     if(active||editLayer?.isConnected)return;
     const layer=el('div'),shadow=layer.attachShadow({mode:'open'}),dialog=el('dialog'),style=el('style');editLayer=layer;
     style.textContent=`dialog{box-sizing:border-box;width:min(900px,94vw);max-height:90vh;border:1px solid #ccdbe7;border-radius:12px;padding:22px;color:#243b50;font:14px/1.6 system-ui;background:#fff}dialog::backdrop{background:#10243d70}h2{margin-top:0}button,input,textarea,select{font:inherit}button{cursor:pointer;padding:6px 12px;margin:4px;border:1px solid #b9cedb;border-radius:6px;background:#f4f9fc;color:#176589}button:disabled{opacity:.5;cursor:default}input:not([type=checkbox]),textarea{box-sizing:border-box;width:100%;padding:7px;border:1px solid #bdcdd9;border-radius:5px}textarea{min-height:70px}label{display:block;margin:8px 0}fieldset{margin:12px 0;border:1px solid #d5e1ea;border-radius:7px}pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#f2f6f9;padding:12px}.status{color:#9c4d12}.actions{position:sticky;bottom:0;background:white;padding:8px 0}.candidates label{display:inline-flex;gap:5px;margin-right:12px}.candidates input[type=text]{width:150px}.hint{color:#586d7d;font-size:12px}`;
-    const heading=el('h2',infos.length===1?'继续编辑稿件':'历史投稿批量编辑'),hint=el('p','先选择稿件并读取最新信息，再预览修改。保存可能触发重新审核；“已投稿”不代表审核通过。'),content=el('div'),notice=el('p','','status'),actions=el('div',undefined,'actions');notice.setAttribute('role','status');
+    const heading=el('h2',infos.length===1?'继续编辑稿件':'历史投稿批量编辑'),hint=el('p',infos.length===1?'打开后自动读取最新稿件，再预览修改。保存可能触发重新审核；“已投稿”不代表审核通过。':'先选择稿件并读取最新信息，再预览修改。保存可能触发重新审核；“已投稿”不代表审核通过。'),content=el('div'),notice=el('p','','status'),actions=el('div',undefined,'actions');notice.setAttribute('role','status');
     const transportLabel=el('label','请求方式'),editTransport=el('select');editTransport.setAttribute('aria-label','稿件编辑请求方式');
     for(const [value,text]of [['page-fetch','页面 fetch'],['extension-http','扩展 HTTP']]){const option=el('option',text);option.value=value;editTransport.append(option);}editTransport.value=env.transport();
     editTransport.onchange=()=>{GM_setValue('request-mode-v1',editTransport.value);invalidate();};transportLabel.append(editTransport,el('small',' 读取遇到 CORS 可手动改用扩展 HTTP；发送后不会自动切换重试。','hint'));
@@ -959,8 +981,10 @@
     }
     const choices=[];
     for(const info of infos){const label=el('label'),input=el('input');input.type='checkbox';let valid=true;try{manuscriptIdentity(info);}catch(_){valid=false;}input.checked=valid&&infos.length===1;input.disabled=!valid;input.dataset.unavailable=String(!valid);label.append(input,document.createTextNode(info.title+' · '+info.state+(valid?'':' · 等待稿件ID，不能编辑')));content.append(label);choices.push({info,input,valid});}
-    button('读取所选稿件',()=>work(async()=>{const selected=choices.filter(c=>c.valid&&c.input.checked).map(c=>c.info);assert(selected.length,'请先选择稿件');session=await manuscriptEditor.prepare(selected);renderEditor();}),content);
+    const loadSelected=()=>work(async()=>{const selected=choices.filter(c=>c.valid&&c.input.checked).map(c=>c.info);assert(selected.length,'请先选择稿件');notice.textContent='正在读取最新稿件信息…';session=await manuscriptEditor.prepare(selected);renderEditor();});
+    button('读取所选稿件',loadSelected,content);
     renderBusy();
+    if(infos.length===1&&choices[0].valid)void loadSelected();
   }
   function sessionPublications(s){const rows=new Map((s.publications||[]).map(p=>[p.sliceId,p]));for(const c of plan?.clips.filter(c=>c.liveKey===s.liveKey)||[])for(const p of c.publications||[])rows.set(p.sliceId,p);return [...rows.values()];}
   function saveLayout(){GM_setValue('ui-v2',JSON.stringify(layout));}
@@ -1331,7 +1355,7 @@
     const progress=el('div',undefined,'progress-box idle');progress.append(el('div','等待扫描','progress-label'),el('progress'));progress.querySelector('progress').value=0;body.append(progress,el('div','扫描与预览不会投稿。','message'));
     const tabs=el('div',undefined,'tabs');tabs.setAttribute('role','tablist');for(const [key,text]of [['plan','回放计划'],['tasks','任务记录'],['logs','运行日志']]){const b=button(text,()=>setTab(key),tabs);b.dataset.tab=key;b.setAttribute('role','tab');b.setAttribute('aria-selected',String(key===tab));}body.append(tabs);
     const workspace=el('div',undefined,'workspace'),planView=el('div',undefined,'plan-view'),filters=el('div',undefined,'filters');const search=el('input');search.type='text';search.className='search';search.placeholder='搜索直播主题或开播日期';search.setAttribute('aria-label','搜索回放');search.oninput=()=>{filterText=search.value;renderPlan();};filters.append(search);
-    const select=el('select');select.className='filter-state';select.setAttribute('aria-label','筛选片段状态');for(const [value,text]of [['all','全部场次'],['ready','可确认场次'],['blocked','已拦下场次']]){const o=el('option',text);o.value=value;select.append(o);}select.onchange=()=>{filterState=select.value;renderPlan();};filters.append(select);planView.append(filters,el('div',undefined,'list'));workspace.append(planView,el('div',undefined,'tasks-view'));const logsView=el('div',undefined,'logs-view');const logActions=el('div');button('导出诊断',()=>run(async()=>{const account=engine.scannedAccount();download('bili-replay-diagnostics.json',{version:'0.8.0',exportedAt:new Date().toISOString(),plan,ledger:await env.read(account),requests:engine.events,logs});message('诊断已导出，不包含Cookie、CSRF或视频流签名。');}),logActions);logsView.append(logActions,el('div',undefined,'log-lines'));workspace.append(logsView);body.append(workspace);
+    const select=el('select');select.className='filter-state';select.setAttribute('aria-label','筛选片段状态');for(const [value,text]of [['all','全部场次'],['ready','可确认场次'],['blocked','已拦下场次']]){const o=el('option',text);o.value=value;select.append(o);}select.onchange=()=>{filterState=select.value;renderPlan();};filters.append(select);planView.append(filters,el('div',undefined,'list'));workspace.append(planView,el('div',undefined,'tasks-view'));const logsView=el('div',undefined,'logs-view');const logActions=el('div');button('导出诊断',()=>run(async()=>{const account=engine.scannedAccount();download('bili-replay-diagnostics.json',{version:'0.8.1',exportedAt:new Date().toISOString(),plan,ledger:await env.read(account),requests:engine.events,logs});message('诊断已导出，不包含Cookie、CSRF或视频流签名。');}),logActions);logsView.append(logActions,el('div',undefined,'log-lines'));workspace.append(logsView);body.append(workspace);
     const foot=el('div',undefined,'foot');foot.append(el('span','已选 0 段','selection'));button('复核失败',()=>run(retry,'复核失败任务'),foot).dataset.work='1';button('停止队列',()=>{engine.stop();message('已请求停止。已发出的请求仍由B站继续处理。');addLog('用户请求停止队列。');},foot,'stop');button('确认投稿…',review,foot,'primary publish-main');body.append(foot);panel.append(body);root.append(panel);
     let drag=null;
     head.onpointerdown=e=>{if(e.button!==0||e.target.closest('button'))return;const r=host.getBoundingClientRect();drag={x:e.clientX,y:e.clientY,left:r.left,top:r.top};head.setPointerCapture(e.pointerId);e.preventDefault();};
