@@ -66,7 +66,29 @@
     "frame reads stay serial during rapid movement",
     "intermediate positions coalesced; latest frame requested",
     "stale frame cannot replace latest selected time",
+    "boundary image hover opens top-layer enlargement",
+    "enlargement uses original image and exceeds thumbnail size",
+    "enlargement stays within viewport",
+    "Escape dismisses enlargement without closing editor",
+    "keyboard focus opens keyframe enlargement",
+    "scroll dismisses stale preview",
+    "replaced frame removes stale enlargement",
+    "resize dismisses enlargement",
+    "focused image opens enlargement when loading finishes",
+    "confirmation cover uses shared enlargement without scroll clipping",
+    "rapid hover switches image without duplicate overlays",
+    "leaving thumbnail dismisses enlargement",
+    "changing image URL dismisses old enlarged image",
     "failed image offers explicit retry",
+    "closing editor cleans up enlargement",
     "closing cancels queued preview"
-  ]
+  ],
+  "environment": {
+    "browser": "Microsoft Edge headless, isolated profile",
+    "viewports": [
+      "1280x1000",
+      "480x900"
+    ],
+    "data": "Synthetic images and mocked APIs only; no live account operations"
+  }
 }
