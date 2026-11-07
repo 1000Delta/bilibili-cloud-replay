@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         B站云端回放分段助手（默认只读）
 // @namespace    local.bilibili.cloud-replay
-// @version      0.8.1
+// @version      0.8.2
 // @license      MIT
 // @description  缓存并后台发现已结束回放，卡片内多选投稿；同日同主题跨场次连续编号，预览随机帧封面后按钮确认提交。
 // @match        https://link.bilibili.com/*

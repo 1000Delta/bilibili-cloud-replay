@@ -126,7 +126,7 @@
     await until(()=>!active&&!invalid&&plan.scope?.mode==='published','published tab scans its current slice page');check(!pageCalls.slice(beforeDraft).some(call=>call.route==='replays'||call.route==='streams'),'published tab never fetches replay history or details');
     nativeTab.textContent='直播场次';pageNumber.textContent='9';check(currentScanContext()===null,'conflicting native page and DOM pager are not guessed');
     // A 12-session page can need more than 20 publication records.
-    replayRows.splice(0,replayRows.length,...Array.from({length:12},(_,i)=>({live_key:String(8800+i),start_time:start-i*86400,end_time:start-i*86400+15000,live_info:{title:'十二场回归 '+i},video_info:{replay_status:1}})));
+    replayRows.splice(0,replayRows.length,...Array.from({length:12},(_,i)=>({live_key:String(8800+i),start_time:start-i*86400,end_time:start-i*86400+15000,live_info:{title:'十二场回归 '+i,cover:'https://i0.hdslb.com/bfs/live/mock.jpg'},video_info:{replay_status:1}})));
     for(const [i,row] of replayRows.entries())for(let j=0;j<3;j++)publicationRows.push({slice_id:88000+i*3+j,av_status:2,av_title:'合成已投稿 '+i+' '+j,start_tm:stamp(row.start_time+j*5000),end_tm:stamp(row.start_time+(j+1)*5000)});
     publicationRows.push(...Array.from({length:24},(_,i)=>({slice_id:99000+i,av_status:2,av_title:'更早记录 '+i,start_tm:stamp(1000000000+i*100),end_tm:stamp(1000000010+i*100)})));
     engine.snapshot=null;engine.publicationCheck=null;plan=null;chosen.clear();window.testLedger={version:1,tasks:{}};pageCalls.length=0;
