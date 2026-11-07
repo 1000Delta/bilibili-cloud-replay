@@ -83,5 +83,49 @@
     hoverZoom(coverThumb);coverThumb.src=syntheticImage+'%20';await tick();check(zoomPanel().hidden,'changing image URL dismisses old enlarged image');coverBox.remove();
     t().querySelector('.frame-image img').dispatchEvent(new Event('error'));check(t().querySelector('.frame-panel').textContent.includes('截图加载失败'),'failed image offers explicit retry');tb('重新读取截图').click();const oldZoom=zoomPanel();tb('取消调整').click();check(!oldZoom.isConnected,'closing editor cleans up enlargement');await new Promise(r=>setTimeout(r,400));check(frameCalls.length===2,'closing cancels queued preview');engine.boundaryFrame=originalFrame;
 
+    // Real DOM, synthetic list transport: paging must never trigger a global replay scan.
+    location.hash='#/my-room/live-record';booted=true;engine.snapshot=null;engine.publicationCheck=null;plan=null;chosen.clear();invalid=true;lastPageAttempt='';
+    const replayRows=Array.from({length:7},(_,i)=>({live_key:String(8000+i),start_time:start-i*7200,end_time:start-i*7200+600,live_info:{title:'分页场次 '+i,cover:'https://i0.hdslb.com/bfs/live/mock.jpg'},video_info:{replay_status:1}}));
+    const pageCalls=[];let blockedPage=null,releasePage=null,blockedStream=true,releaseStream=null,observedAt=performance.now()+1000;
+    env.request=async(url,p,method)=>{
+      const route=Object.keys(ROUTES).find(key=>ROUTES[key]===url);pageCalls.push({route,params:{...p},method});check(method==='GET','page discovery remains read-only');let data;
+      if(route==='nav')data={isLogin:true,mid:123};
+      else if(route==='replays'){if(p.page===blockedPage)await new Promise(resolve=>releasePage=resolve);data={replay_info:replayRows.slice((p.page-1)*p.page_size,p.page*p.page_size),pagination:{total:replayRows.length}};}
+      else if(route==='published')data={list:[],total:0};
+      else if(route==='streams'){if(blockedStream){blockedStream=false;await new Promise(resolve=>releaseStream=resolve);}const replay=replayRows.find(row=>row.live_key===p.live_key);data={list:[{start_time:replay.start_time,end_time:replay.end_time}]};}
+      else throw Error('Unexpected page-test request');return {http:200,json:{code:0,data}};
+    };
+    const official=el('section');official.className='replay';official.innerHTML='<div class="replay-tab"><button class="replay-btn active">直播场次</button></div><div class="replay-list"></div><nav class="pagination"><button aria-current="page">1</button></nav>';document.body.append(official);
+    const pageList=official.querySelector('.replay-list'),pageNumber=official.querySelector('[aria-current=page]'),nativeTab=official.querySelector('.replay-btn');
+    const showPage=(page,size=2)=>{
+      pageNumber.textContent=String(page);pageList.replaceChildren();
+      for(const row of replayRows.slice((page-1)*size,page*size)){
+        const card=el('article');card.className='replay-item';const info=el('div');info.className='info';const title=el('div',row.live_info.title,'title');title.title=row.live_info.title;info.append(title,el('div',stamp(row.start_time).slice(0,16),'date'));card.append(info);pageList.append(card);
+      }
+      pageTracker.observe([{name:ROUTES.replays+`?page=${page}&page_size=${size}`,startTime:++observedAt}]);paintInline();
+    };
+    const until=async(predicate,label)=>{for(let i=0;i<160&&!predicate();i++)await new Promise(resolve=>setTimeout(resolve,20));check(predicate(),label);};
+    const toolbarButton=text=>[...inlineRoot.querySelectorAll('button')].find(button=>button.textContent===text);
+    showPage(1);await until(()=>!!releaseStream,'current page starts fetching first detail without later replay pages');
+    check(plan?.partial&&plan.sessions.length===2&&plan.sessions.every(session=>session.pending),'replay cards render while their details are still pending');
+    check(pageCalls.slice(0,4).map(call=>call.route).join(',')==='nav,replays,published,streams','UI requests replay page then publication page then details');
+    check(toolbarButton('批量投稿…').disabled,'partial scan cannot publish');releaseStream();await until(()=>!active&&!invalid,'first page finishes and becomes actionable');paintInline();
+    check(pageCalls.filter(call=>call.route==='replays').length===1&&plan.sessions.length===2,'initial scan does not request hidden replay pages');
+    toolbarButton('选择本页可投稿').click();const firstSelection=[...chosen];check(firstSelection.length===2,'first page selection is scoped to visible cards');
+    showPage(2);await until(()=>!active&&!invalid&&plan.scope?.page===2,'equal-count next page automatically scans');paintInline();
+    toolbarButton('选择本页可投稿').click();check(chosen.size===4&&firstSelection.every(key=>chosen.has(key)),'new toolbar selects current page while retaining earlier chosen clips');
+    check(pageCalls.filter(call=>call.route==='replays').map(call=>call.params.page).join(',')==='1,2','page navigation fetches only the destination replay page');
+    chosen.clear();showPage(4);await until(()=>!active&&!invalid&&plan.scope?.page===4,'short final page automatically scans');
+    check(pageCalls.filter(call=>call.route==='replays').at(-1).params.page_size===2&&plan.sessions.length===1,'last-page card count does not change API page size');
+    showPage(1,3);await until(()=>!active&&!invalid&&plan.scope?.size===3,'changing page size rescans the displayed window');check(plan.sessions.length===3,'changed page size uses all and only visible cards');
+    blockedPage=2;showPage(2,3);await until(()=>!!releasePage,'old page request can remain outstanding');showPage(3,3);releasePage();blockedPage=null;
+    await until(()=>!active&&!invalid&&plan.scope?.page===3&&plan.scope?.size===3,'latest page wins when navigation interrupts a scan');
+    check(plan.sessions.length===1&&plan.sessions[0].liveKey===replayRows[6].live_key,'late response does not replace the newer page');
+    const beforeDraft=pageCalls.length;nativeTab.textContent='回放剪辑草稿';paintInline();await new Promise(resolve=>setTimeout(resolve,250));check(pageCalls.length===beforeDraft&&inlineBar.hidden,'draft tab does not scan replay history');
+    nativeTab.textContent='已发布片段';pageList.replaceChildren();pageNumber.textContent='1';pageTracker.observe([{name:ROUTES.published+'?page=1&page_size=20',startTime:++observedAt}]);engine.publicationCheck=null;paintInline();
+    await until(()=>!active&&!invalid&&plan.scope?.mode==='published','published tab scans its current slice page');check(!pageCalls.slice(beforeDraft).some(call=>call.route==='replays'||call.route==='streams'),'published tab never fetches replay history or details');
+    nativeTab.textContent='直播场次';pageNumber.textContent='9';check(currentScanContext()===null,'conflicting native page and DOM pager are not guessed');
+    official.remove();booted=false;clearTimeout(pageScanTimer);location.hash='';
+
     const report=document.createElement('pre');report.id='ui-test-result';report.textContent=JSON.stringify({passed:true,checks:results},null,2);document.body.append(report);
   })().catch(error=>{const report=document.createElement('pre');report.id='ui-test-result';report.textContent=JSON.stringify({passed:false,error:error.stack});document.body.append(report);});
