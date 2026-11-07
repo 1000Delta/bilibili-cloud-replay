@@ -453,6 +453,25 @@
       this.notify({stage:'published',text:'确认投稿前完整核对已有片段，避免跨页重复投稿'});
       this.rememberPublications(uid,await this.list('published'));
     }
+    async coverReplayPage(uid,sessions,checkCurrent,onProgress) {
+      const targets=sessions.filter(s=>s.ranges?.length),initial=this.publicationCheck;
+      if(!targets.length||initial.complete)return;
+      const {total,size}=initial;
+      // Replay pages contain sessions, while publication pages contain slices.
+      // One replay can span several slices: never equate the two page boundaries.
+      for(let page=1;!this.publicationCheck.complete;page++) {
+        checkCurrent();
+        const rows=this.knownPublications(uid);
+        if(targets.every(s=>{const c=sessionCoverage(s.ranges,rows,false);return c.total>0&&c.covered>=c.total;}))return;
+        assert(page<=MAX_PAGES&&page<=Math.ceil(total/size),'投稿分页超过安全上限，无法核对本页全部场次');
+        if(this.publicationCheck.pages?.[`${size}:${page}`])continue;
+        this.notify({stage:'published',text:`补全本页场次投稿状态 · 切片第 ${page} 页`});
+        await this.publicationPage(uid,page,size);
+        checkCurrent();
+        assert(this.publicationCheck.total===total&&this.publicationCheck.size===size,'投稿分页发生变化，请刷新当前页');
+        onProgress(this.knownPublications(uid));
+      }
+    }
     dedupRows(uid,ledger,excludeKey) {
       const local=Object.entries(ledger.tasks).filter(([key,t])=>key!==excludeKey&&Number(t.attempts)>0&&t.clip&&['sending','unknown','accepted','processing','posted'].includes(t.state)).map(([key,t])=>({slice_id:t.sliceId||'local:'+key,av_status:t.state==='posted'?2:0,av_title:t.approvedTitle||t.clip.title,start_tm:stamp(t.clip.start),end_tm:stamp(t.clip.end)}));
       return [...this.knownPublications(uid),...local];
@@ -468,7 +487,7 @@
         const checkCurrent=()=>assert(!options.isCurrent||options.isCurrent(),'页面已切换，停止旧页扫描');
         checkCurrent();if(options.mode!=='published')options.validatePage?.('replays',replayPage.rows);
         const publishedPage=options.publishedPage??page,publishedSize=options.publishedPageSize??20;
-        const rows=await this.publicationPage(uid,publishedPage,publishedSize,!!options.force),replays=replayPage.rows;
+        let rows=await this.publicationPage(uid,publishedPage,publishedSize,!!options.force);const replays=replayPage.rows;
         checkCurrent();if(options.mode==='published')options.validatePage?.('published',this.publicationCheck.pages?.[`${publishedSize}:${publishedPage}`]||rows.slice((publishedPage-1)*publishedSize,publishedPage*publishedSize));
         let cache={};
         try {cache=await this.env.cacheRead?.(uid)||{};}catch(_) {}
@@ -507,6 +526,11 @@
           checkCurrent();delete session.pending;done++;preview();
           if(done<replays.length)await this.env.sleep(200);
         }
+        await this.coverReplayPage(uid,sessions.filter(s=>currentKeys.has(s.liveKey)),checkCurrent,updated=>{
+          rows=updated;
+          for(const session of sessions)if(session.ranges)session.coverage=sessionCoverage(session.ranges,rows,this.publicationCheck.complete);
+          preview();
+        });
         checkCurrent();sessions.sort((a,b)=>a.start-b.start);clips.sort((a,b)=>a.broadcastStart-b.broadcastStart||a.start-b.start);
         for(const session of sessions)if(session.ranges)session.coverage=sessionCoverage(session.ranges,rows,this.publicationCheck.complete);
         // Partial-page titles are previews, not durable numbering reservations.

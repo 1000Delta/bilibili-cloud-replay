@@ -493,9 +493,9 @@ test('old rejected tasks can reuse their already-recorded approved cover timesta
  assert.equal((await f.engine.savedCoverChoices([c.key]))[c.key].ts,c.start+100);f.store['123'].coverDrafts={[c.key]:{liveKey:c.liveKey,start:c.start,end:c.end,source:'default',ts:null}};assert.equal((await f.engine.savedCoverChoices([c.key]))[c.key].source,'default');assert.equal(posts(f).length,0);
 });
 
-test('a batch completes publication pagination only after confirmation and later scans reuse it',async()=>{
+test('unposted replay coverage completes publication pagination once and later review/scans reuse it',async()=>{
  const rows=Array.from({length:45},(_,i)=>({slice_id:10000+i,av_status:2,av_title:'历史'+i,start_tm:C.stamp(1000000000+i*200),end_tm:C.stamp(1000000100+i*200)})),f=fixture({published:rows});withCache(f);const p=await f.engine.scan(),initial=f.calls.filter(c=>c.route==='published').length;
- assert.equal(initial,1);assert.equal(p.publicationsComplete,false);const ready=await f.engine.prepareReview(p.token);await f.engine.publish(ready.clips.map(c=>c.key),ready.token);assert.equal(f.calls.filter(c=>c.route==='publish').length,3);assert.equal(f.calls.filter(c=>c.route==='published').length,initial+3);await f.engine.scan();assert.equal(f.calls.filter(c=>c.route==='published').length,initial+3);
+ assert.equal(initial,3);assert.equal(p.publicationsComplete,true);const ready=await f.engine.prepareReview(p.token);await f.engine.publish(ready.clips.map(c=>c.key),ready.token);assert.equal(f.calls.filter(c=>c.route==='publish').length,3);assert.equal(f.calls.filter(c=>c.route==='published').length,initial);await f.engine.scan();assert.equal(f.calls.filter(c=>c.route==='published').length,initial);
 });
 test('manual rejection reset and one-segment retries add zero publication list requests',async()=>{
  let reject=true;const f=fixture({onRequest:async route=>route==='publish'&&reject?{http:200,json:{code:4001,message:'too fast'}}:undefined}),p=await f.engine.scan(),c=p.clips[0],initial=f.calls.filter(c=>c.route==='published').length;
@@ -632,14 +632,14 @@ test('downloaded HTML or oversized bodies stop at validation without re-fetching
 // Page-scoped discovery uses only synthetic rows. No account or remote calls.
 const replayPages=n=>Array.from({length:n},(_,i)=>({...clone(REPLAY),live_key:String(9000+i),live_info:{...REPLAY.live_info,title:'场次 '+i}}));
 const publicationPages=n=>Array.from({length:n},(_,i)=>({slice_id:10000+i,av_status:2,av_title:'历史 '+i,start_tm:C.stamp(1000000000+i*200),end_tm:C.stamp(1000000100+i*200)}));
-test('default discovery interleaves the first replay/publication page and details without walking later pages',async()=>{
+test('default discovery shows current replay details before completing uncovered publication history',async()=>{
  const f=fixture({replays:replayPages(40),published:publicationPages(45)}),updates=[];
  const plan=await f.engine.scan({}, {onProgress:p=>updates.push(clone(p))});
  assert.deepEqual(f.calls.slice(0,4).map(c=>c.route),['nav','replays','published','streams']);
- assert.deepEqual(f.calls.filter(c=>c.route==='replays').map(c=>c.p.page),[1]);assert.deepEqual(f.calls.filter(c=>c.route==='published').map(c=>c.p.page),[1]);
+ assert.deepEqual(f.calls.filter(c=>c.route==='replays').map(c=>c.p.page),[1]);assert.deepEqual(f.calls.filter(c=>c.route==='published').map(c=>c.p.page),[1,2,3]);
  assert.equal(plan.sessions.length,30);assert.equal(f.calls.filter(c=>c.route==='streams').length,30);
- assert.equal(updates.length,31);assert(updates[0].sessions.every(s=>s.pending));assert.equal(updates[1].sessions.filter(s=>!s.pending).length,1);assert.equal(updates.at(-1).partial,true);
- assert.equal(plan.publicationsComplete,false);assert(plan.sessions.every(s=>s.coverage.status==='待完整核对'));assert.equal(posts(f).length,0);
+ assert.equal(updates.length,33);assert(updates[0].sessions.every(s=>s.pending));assert.equal(updates[1].sessions.filter(s=>!s.pending).length,1);assert.equal(updates.at(-1).partial,true);
+ assert.equal(plan.publicationsComplete,true);assert(plan.sessions.every(s=>s.coverage.status==='未投稿'));assert.equal(posts(f).length,0);
 });
 test('a requested final replay page preserves API page size and reads only that page details',async()=>{
  const replays=replayPages(8),f=fixture({replays,published:publicationPages(45)}),p=await f.engine.scan({}, {page:3,pageSize:3,publishedPageSize:20});
@@ -650,22 +650,23 @@ test('published-tab discovery only reads the current slice page and no replay or
  const f=fixture({published:publicationPages(45)}),seen=[];const p=await f.engine.scan({}, {mode:'published',page:2,publishedPage:2,publishedPageSize:20,validatePage:(route,rows)=>seen.push([route,rows.length])});
  assert.equal(p.published.length,20);assert.equal(p.sessions.length,0);assert.deepEqual(f.calls.map(c=>c.route),['nav','published']);assert.deepEqual(seen,[['published',20]]);
 });
-test('outside-page duplicates are found before any publication or image-upload POST',async()=>{
- const rows=publicationPages(21),f=fixture({published:rows}),p=await f.engine.scan(),c=p.clips[0];
+test('outside-page duplicates are found during current-page coverage before any POST',async()=>{
+ const rows=publicationPages(21),c=C.makeClips(REPLAY,STREAM).clips[0];
  rows[20]={slice_id:777,av_status:2,av_title:'另一个标题',start_tm:C.stamp(c.start),end_tm:C.stamp(c.end)};
- assert(!c.blocked);const ready=await f.engine.prepareReview(p.token);assert(ready.clips.find(clip=>clip.key===c.key).blocked);assert.equal(posts(f).length,0);assert.equal(f.store['123'].tasks[c.key].state,'duplicate');
+ const f=fixture({published:rows}),p=await f.engine.scan(),ready=await f.engine.prepareReview(p.token);
+ assert(ready.clips.find(clip=>clip.key===c.key).blocked);assert.equal(posts(f).length,0);assert.equal(f.store['123'].tasks[c.key].state,'duplicate');
 });
-test('incomplete full deduplication after confirmation fails closed before every POST',async()=>{
- let confirmed=false;const f=fixture({published:publicationPages(21),onRequest:async(route,p)=>confirmed&&route==='published'&&p.page===2?{http:200,json:{code:0,data:{list:[],total:21}}}:undefined});
- const p=await f.engine.scan();confirmed=true;await assert.rejects(f.engine.prepareReview(p.token),/分页提前/);assert.equal(posts(f).length,0);assert.equal(f.engine.publicationCheck.complete,false);
+test('early current-page coverage still requires full deduplication and fails closed if it is truncated',async()=>{
+ let confirmed=false;const f=twelveReplayFixture({onRequest:async(route,p)=>confirmed&&route==='published'&&p.page===3?{http:200,json:{code:0,data:{list:[],total:80}}}:undefined});
+ const p=await f.engine.scan({}, {pageSize:12});assert.equal(p.publicationsComplete,false);confirmed=true;await assert.rejects(f.engine.prepareReview(p.token),/分页提前/);assert.equal(posts(f).length,0);assert.equal(f.engine.publicationCheck.complete,false);
 });
-test('force scan drops old complete deduplication and still refreshes only the requested page',async()=>{
- const f=fixture({published:publicationPages(45)});await f.engine.scan();await f.engine.reconcile();const before=f.calls.length;
- const p=await f.engine.scan({}, {force:true});assert.equal(p.publicationsComplete,false);assert.deepEqual(f.calls.slice(before).filter(c=>c.route==='published').map(c=>c.p.page),[1]);
+test('force scan resets old coverage and reads only enough slice pages for the current replay page',async()=>{
+ const f=twelveReplayFixture();await f.engine.scan({}, {pageSize:12});await f.engine.reconcile();const before=f.calls.length;
+ const p=await f.engine.scan({}, {pageSize:12,force:true});assert.equal(p.publicationsComplete,false);assert.deepEqual(f.calls.slice(before).filter(c=>c.route==='published').map(c=>c.p.page),[1,2]);assert.deepEqual(f.calls.slice(before).filter(c=>c.route==='replays').map(c=>c.p.page),[1]);
 });
 test('visiting all publication pages completes coverage but duplicate drifting pages fail closed',async()=>{
- const f=fixture({published:publicationPages(45)});await f.engine.scan();await f.engine.scan({}, {mode:'published',page:2});assert.equal(f.engine.publicationCheck.complete,false);await f.engine.scan({}, {mode:'published',page:3});assert.equal(f.engine.publicationCheck.complete,true);
- const g=fixture({published:publicationPages(45)});await g.engine.scan();g.published[20]=clone(g.published[0]);await assert.rejects(g.engine.scan({}, {mode:'published',page:2}),/分页发生变化/);assert.equal(g.engine.publicationCheck.complete,false);
+ const f=fixture({published:publicationPages(45)});await f.engine.scan({}, {mode:'published'});await f.engine.scan({}, {mode:'published',page:2});assert.equal(f.engine.publicationCheck.complete,false);await f.engine.scan({}, {mode:'published',page:3});assert.equal(f.engine.publicationCheck.complete,true);
+ const g=fixture({published:publicationPages(45)});await g.engine.scan({}, {mode:'published'});g.published[20]=clone(g.published[0]);await assert.rejects(g.engine.scan({}, {mode:'published',page:2}),/分页发生变化/);assert.equal(g.engine.publicationCheck.complete,false);
 });
 test('page changes stop the old scan before reading more details or replacing its snapshot',async()=>{
  let current=true;const f=fixture({replays:replayPages(3),onRequest:async route=>{if(route==='streams')current=false;}});
@@ -697,15 +698,81 @@ test('partial publication coverage never declares an uncovered range unposted',(
 });
 
 test('partial numbering stays provisional and full review resolves older off-page reservations before approval',async()=>{
- const rows=publicationPages(21),f=fixture({published:rows}),prefix=C.title(REPLAY.live_info.title,REPLAY.start_time,1);rows[20].av_title=prefix;
+ const rows=publicationPages(21),f=fixture({published:rows}),prefix=C.title(REPLAY.live_info.title,REPLAY.start_time,1);rows[20].av_title=prefix;rows[0]={...rows[0],av_title:'覆盖本场的人工稿件',start_tm:C.stamp(STREAM.list[0].start_time),end_tm:C.stamp(STREAM.list[0].end_time)};
  const partial=await f.engine.scan(),key=partial.clips[0].key;assert.equal(partial.clips[0].title,prefix);assert.equal(f.store['123'].numbering,undefined);
  assert.throws(()=>f.engine.beginReview(partial.token,[key]),/完整核对/);await assert.rejects(f.engine.publish([key],partial.token),/完整核对/);assert.equal(posts(f).length,0);
- const ready=await f.engine.prepareReview(partial.token);assert.equal(ready.clips[0].sequence,2);assert(!ready.clips[0].blocked);assert.equal(ready.publicationsComplete,true);assert.doesNotThrow(()=>f.engine.beginReview(ready.token,[key]));
- await f.engine.publish([key],ready.token);assert.equal(f.calls.find(call=>call.route==='publish').p.av_title,C.title(REPLAY.live_info.title,REPLAY.start_time,2));
+ const ready=await f.engine.prepareReview(partial.token);assert.equal(ready.clips[0].sequence,2);assert(ready.clips[0].blocked);assert.equal(ready.publicationsComplete,true);assert.doesNotThrow(()=>f.engine.beginReview(ready.token,[key]));
+ assert.equal(posts(f).length,0);assert(ready.published.some(p=>p.title===prefix));
 });
 
-test('explicit task refresh finalizes provisional numbering before checking full-history conflicts',async()=>{
+test('explicit task refresh preserves final numbering after replay coverage exhausts history',async()=>{
  const rows=publicationPages(21),f=fixture({published:rows});rows[20].av_title=C.title(REPLAY.live_info.title,REPLAY.start_time,1);
- const partial=await f.engine.scan(),key=partial.clips[0].key;await f.engine.reconcile();const ready=await f.engine.prepareReview(f.engine.snapshot.token);
+ const partial=await f.engine.scan(),key=partial.clips[0].key;assert.equal(partial.publicationsComplete,true);await f.engine.reconcile();const ready=await f.engine.prepareReview(f.engine.snapshot.token);
  assert.equal(ready.clips[0].sequence,2);assert(!f.store['123'].tasks[key]);assert(!ready.clips[0].blocked);await f.engine.publish([key],ready.token);assert.equal(posts(f).length,1);
+});
+
+function twelveReplayFixture(options={}) {
+ const replays=Array.from({length:12},(_,i)=>({...clone(REPLAY),live_key:String(5000+i),start_time:REPLAY.start_time-i*86400,end_time:REPLAY.start_time-i*86400+15000,live_info:{...REPLAY.live_info,title:'完整本页 '+i}}));
+ const streamMap=Object.fromEntries(replays.map(r=>[r.live_key,{list:[{start_time:r.start_time,end_time:r.end_time}]}]));
+ const published=replays.flatMap((r,i)=>C.makeClips(r,streamMap[r.live_key]).clips.map((clip,j)=>({slice_id:50000+i*3+j,av_status:2,av_title:clip.title,start_tm:C.stamp(clip.start),end_tm:C.stamp(clip.end)})));
+ return fixture({replays,streamMap,published:[...published,...publicationPages(44)],...options});
+}
+test('all twelve replay cards resolve even when their 36 slices span two publication pages',async()=>{
+ const f=twelveReplayFixture(),updates=[];const p=await f.engine.scan({}, {pageSize:12,onProgress:p=>updates.push(clone(p))});
+ assert.equal(p.sessions.length,12);assert(p.sessions.every(s=>s.coverage.status==='已投稿'));assert.equal(p.clips.length,36);assert(p.clips.every(c=>c.blocked));
+ assert.deepEqual(f.calls.filter(c=>c.route==='replays').map(c=>c.p.page),[1]);assert.deepEqual(f.calls.filter(c=>c.route==='published').map(c=>c.p.page),[1,2]);
+ assert.equal(f.calls.filter(c=>c.route==='streams').length,12);assert.equal(p.publicationsComplete,false);assert.equal(posts(f).length,0);
+ assert(updates.some(p=>p.sessions.some(s=>s.pending)));assert(updates.at(-1).sessions.every(s=>s.coverage.status==='已投稿'));
+ const before=f.calls.length;await f.engine.scan({}, {pageSize:12});assert(!f.calls.slice(before).some(c=>c.route==='published'),'reuses coverage pages');
+});
+
+test('a fully covered first page stops early but does not claim global publication completeness',async()=>{
+ const rows=publicationPages(45);rows[0]={...rows[0],start_tm:C.stamp(STREAM.list[0].start_time),end_tm:C.stamp(STREAM.list[0].end_time)};
+ const f=fixture({published:rows}),p=await f.engine.scan();assert.equal(p.sessions[0].coverage.status,'已投稿');assert.equal(p.publicationsComplete,false);assert.deepEqual(f.calls.filter(c=>c.route==='published').map(c=>c.p.page),[1]);assert.equal(posts(f).length,0);
+});
+test('mixed processing/posted coverage resolves the tail but failed slices do not stop pagination',async()=>{
+ const f=twelveReplayFixture();for(let i=20;i<36;i++)f.published[i].av_status=1;
+ const p=await f.engine.scan({}, {pageSize:12});assert(p.sessions.every(s=>['已投稿','处理中'].includes(s.coverage.status)));assert.equal(f.calls.filter(c=>c.route==='published').length,2);
+ const g=twelveReplayFixture();g.published[35].av_status=3;const q=await g.engine.scan({}, {pageSize:12});assert.equal(q.publicationsComplete,true);assert.equal(q.sessions[0].coverage.status,'部分已投稿');assert.deepEqual(g.calls.filter(c=>c.route==='published').map(c=>c.p.page),[1,2,3,4]);assert.equal(posts(g).length,0);
+});
+test('unposted and partially posted last cards exhaust slice history without reading more replays',async()=>{
+ const f=twelveReplayFixture();f.published.splice(30,6);const p=await f.engine.scan({}, {pageSize:12});assert.equal(p.publicationsComplete,true);assert.equal(p.sessions.filter(s=>s.coverage.status==='未投稿').length,2);assert(p.sessions.slice(0,2).every(s=>s.coverage.status!=='待完整核对'));assert.equal(f.calls.filter(c=>c.route==='replays').length,1);assert.equal(posts(f).length,0);
+});
+test('coverage continuation reads missing earlier slice pages and skips a cached current slice page',async()=>{
+ const f=twelveReplayFixture(),p=await f.engine.scan({}, {page:3,pageSize:4});assert.equal(p.sessions.length,4);assert(p.sessions.every(s=>s.coverage.status==='已投稿'));assert.deepEqual(f.calls.filter(c=>c.route==='published').map(c=>c.p.page),[3,1,2]);assert.deepEqual(f.calls.filter(c=>c.route==='replays').map(c=>c.p.page),[3]);assert.equal(f.calls.filter(c=>c.route==='streams').length,4);assert.equal(posts(f).length,0);
+});
+test('off-page retained uncovered selections do not force current-page coverage to scan all history',async()=>{
+ const f=twelveReplayFixture();f.published.splice(0,3);const first=await f.engine.scan({}, {page:1,pageSize:1}),key=first.clips[0].key;assert.equal(first.sessions[0].coverage.status,'未投稿');
+ const before=f.calls.length,p=await f.engine.scan({}, {page:2,pageSize:1,retainKeys:[key],force:true});assert.equal(p.sessions.length,2);assert.deepEqual(f.calls.slice(before).filter(c=>c.route==='published').map(c=>c.p.page),[2,1]);assert.equal(p.publicationsComplete,false);assert.equal(posts(f).length,0);
+});
+test('navigation during extra slice pagination stops without writing a snapshot or fetching later pages',async()=>{
+ let current=true;const f=twelveReplayFixture({onRequest:async(route,p)=>{if(route==='published'&&p.page===2)current=false;}});
+ await assert.rejects(f.engine.scan({}, {pageSize:12,isCurrent:()=>current}),/页面已切换/);assert.equal(f.engine.snapshot,null);assert.equal(f.store['123'],undefined);assert.deepEqual(f.calls.filter(c=>c.route==='published').map(c=>c.p.page),[1,2]);assert.equal(posts(f).length,0);
+});
+test('total drift, duplicate rows and truncated continuation all fail closed before storing a plan',async()=>{
+ for(const kind of ['total','duplicate','short']){
+  let f;f=twelveReplayFixture({onRequest:async(route,p)=>{
+   if(route!=='published'||p.page!==2)return;
+   const list=clone(f.published.slice(20,40));if(kind==='duplicate')list[0]=clone(f.published[0]);if(kind==='short')list.pop();
+   return {http:200,json:{code:0,data:{list,total:kind==='total'?81:80}}};
+  }});
+  await assert.rejects(f.engine.scan({}, {pageSize:12}),/分页发生变化|分页提前/);assert.equal(f.engine.snapshot,null);assert.equal(f.store['123'],undefined);assert.equal(posts(f).length,0);
+ }
+});
+test('overlapping slice rows cannot double-count coverage and skip an uncovered tail',async()=>{
+ const rows=publicationPages(45);for(let i=0;i<2;i++)rows[i]={...rows[i],start_tm:C.stamp(STREAM.list[0].start_time),end_tm:C.stamp(STREAM.list[0].end_time-100)};
+ const f=fixture({published:rows}),p=await f.engine.scan();assert.equal(p.publicationsComplete,true);assert.equal(p.sessions[0].coverage.status,'部分已投稿');assert.deepEqual(f.calls.filter(c=>c.route==='published').map(c=>c.p.page),[1,2,3]);assert.equal(posts(f).length,0);
+});
+test('empty and unusable replay pages do not walk publication history without a coverage target',async()=>{
+ for(const replays of [[],[{...REPLAY,end_time:REPLAY.start_time}]]){const f=fixture({replays,published:publicationPages(45)});await f.engine.scan();assert.deepEqual(f.calls.filter(c=>c.route==='published').map(c=>c.p.page),[1]);assert.equal(posts(f).length,0);}
+});
+test('explicit refresh finalizes a genuinely partial-coverage numbering snapshot',async()=>{
+ const rows=publicationPages(21),f=fixture({published:rows});rows[20].av_title=C.title(REPLAY.live_info.title,REPLAY.start_time,1);rows[0]={...rows[0],av_title:'人工覆盖',start_tm:C.stamp(STREAM.list[0].start_time),end_tm:C.stamp(STREAM.list[0].end_time)};
+ const partial=await f.engine.scan();assert.equal(partial.publicationsComplete,false);assert.equal(partial.clips[0].sequence,1);assert.equal(f.store['123'].numbering,undefined);
+ await f.engine.reconcile();const ready=await f.engine.prepareReview(f.engine.snapshot.token);assert.equal(ready.clips[0].sequence,2);assert.equal(ready.publicationsComplete,true);assert.equal(posts(f).length,0);
+});
+test('a failed continuation preserves an existing snapshot and saved ledger',async()=>{
+ let fail=false;const f=twelveReplayFixture({onRequest:async(route,p)=>fail&&route==='published'&&p.page===2?{http:200,json:{code:0,data:{list:[],total:80}}}:undefined});
+ const original=await f.engine.scan({}, {pageSize:1}),saved=clone(f.store['123']);fail=true;
+ await assert.rejects(f.engine.scan({}, {pageSize:12,force:true}),/分页提前/);assert.equal(f.engine.snapshot,original);assert.deepEqual(f.store['123'],saved);assert.equal(posts(f).length,0);
 });
