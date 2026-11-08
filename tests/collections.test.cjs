@@ -351,3 +351,114 @@ test('default cancellation, persistence failure and replay preserve no-double-wr
  for(const failure of ['stop','journal']){const f=fixture(),p=await directPlan(f,'existing');if(failure==='stop')f.options.onSleep=()=>f.manager.stop();else f.options.failWrite=true;await f.manager.execute(p.token,{confirmed:true});assert.equal(f.posts().length,0);}
  const f=fixture(),p=await directPlan(f);await f.manager.execute(p.token,{confirmed:true});await f.manager.execute(p.token,{confirmed:true});assert.equal(f.posts().length,2);
 });
+
+function countRoutes(calls){return Object.fromEntries([...new Set(calls.map(c=>c.route))].map(route=>[route,calls.filter(c=>c.route===route).length]));}
+function addSyntheticVideos(f,total){
+ for(let aid=4;aid<=total;aid++){f.remote[aid]=clone(f.remote[1]);Object.assign(f.remote[aid].archive,{aid,title:'原神 '+aid});f.remote[aid].videos[0].cid=aid+100;f.publications.push({slice_id:1000+aid,avid:aid,av_title:'原神 '+aid,av_cover:f.remote[aid].archive.cover,av_status:2});}
+}
+test('34 adds with seven sections read members once before and once after the complete batch',async()=>{
+ const f=fixture();addSyntheticVideos(f,34);f.addSeason(10,'已有合集',[100,101]);for(let id=11;id<=15;id++)f.addSeason(id,'其他合集 '+id,[id*100]);
+ const p=await directPlan(f,'existing',f.publications.map(v=>String(v.avid))),before=f.calls.length;
+ const result=await f.manager.execute(p.token,{confirmed:true}),calls=f.calls.slice(before),counts=countRoutes(calls),adds=calls.map((c,i)=>c.route==='addCollectionEpisodes'?i:-1).filter(i=>i>=0);
+ assert.equal(counts.collections,1);assert.equal(counts.collectionSection,9);assert.equal(counts.collectionDetail,1);assert.equal(counts.collectionVideoParts,34);assert.equal(counts.addCollectionEpisodes,34);assert.equal(counts.manuscript,undefined);assert.equal(counts.nav,70);assert.equal(calls.length,149);
+ assert.equal(calls.slice(0,adds[0]).filter(c=>c.route==='collectionSection').length,7);
+ assert.equal(calls.slice(adds[0]+1,adds.at(-1)).filter(c=>['collections','collectionDetail','collectionSection'].includes(c.route)).length,0);
+ assert.deepEqual(calls.slice(adds.at(-1)+1).filter(c=>c.route==='collectionSection').map(c=>c.p.id),['100','101']);
+ assert.equal(result.filter(j=>j.state==='accepted').length,34);assert.equal(result.filter(j=>j.state==='verified').length,34);assert.equal(Object.values(f.store().collectionJobs.imports).filter(j=>j.state==='verified').length,34);
+});
+test('successful new collection keeps its ID and cached members until a single final verification',async()=>{
+ const f=fixture(),p=await directPlan(f,'new',['1','2','3']),before=f.calls.length;await f.manager.execute(p.token,{confirmed:true});const calls=f.calls.slice(before),counts=countRoutes(calls);
+ assert.equal(counts.collections,1);assert.equal(counts.collectionSection,1);assert.equal(counts.collectionDetail,2);assert.equal(counts.createCollection,1);assert.equal(counts.addCollectionEpisodes,3);
+ const first=calls.findIndex(c=>c.route==='addCollectionEpisodes'),last=calls.findLastIndex(c=>c.route==='addCollectionEpisodes');assert(!calls.slice(first+1,last).some(c=>['collections','collectionDetail','collectionSection'].includes(c.route)));
+ assert(calls.findIndex(c=>c.route==='collectionSection')>last);assert.equal(f.store().collectionJobs.creations['new:直接合集'].state,'verified');
+});
+test('multiple target groups share initial membership and verify each complete target only at the end',async()=>{
+ const f=fixture();f.addSeason(10,'第一合集',[100,101]);f.addSeason(20,'第二合集',[200,201]);f.addSeason(30,'未改合集',[300]);
+ const p=await f.manager.preview(await f.manager.prepare(),[{seasonId:10,sectionId:101,aids:['1','2']},{seasonId:20,sectionId:201,aids:['3']}]),before=f.calls.length;
+ await f.manager.execute(p.token,{confirmed:true});const calls=f.calls.slice(before),last=calls.findLastIndex(c=>c.route==='addCollectionEpisodes');
+ assert.equal(countRoutes(calls).collections,1);assert.equal(countRoutes(calls).collectionSection,9);assert.deepEqual(calls.slice(last+1).filter(c=>c.route==='collectionDetail').map(c=>c.p.id),['10','20']);assert(!calls.slice(last+1).some(c=>c.route==='collectionSection'&&c.p.id==='300'));
+ assert.deepEqual(f.posts().map(c=>c.p.sectionId),[101,101,201]);
+});
+test('initial multi-page membership snapshot stays complete without repeated pagination per add',async()=>{
+ const f=fixture();for(let id=1;id<=31;id++)f.addSeason(id,'合集 '+id,[id*100]);const p=await f.manager.preview(await f.manager.prepare(),[{seasonId:10,sectionId:1000,aids:['1','2','3']}]),before=f.calls.length;
+ await f.manager.execute(p.token,{confirmed:true});const calls=f.calls.slice(before);assert.deepEqual(calls.filter(c=>c.route==='collections').map(c=>c.p.pn),[1,2]);assert.equal(countRoutes(calls).collectionSection,32);
+});
+test('a fresh execution never reuses a prior batch snapshot after rejection or preflight failure',async()=>{
+ const f=fixture({rejectAdd:true}),p=await directPlan(f,'existing',['1','2']);await f.manager.execute(p.token,{confirmed:true});assert.equal(f.posts().length,1);
+ f.options.rejectAdd=false;f.addSeason(30,'并发合集',[300]);f.addMember(300,1);const before=f.calls.length,result=await f.manager.execute(p.token,{confirmed:true});assert.equal(f.posts().length,1);assert(result.some(j=>j.message?.includes('不会移动成员')));assert.equal(countRoutes(f.calls.slice(before)).collectionSection,2);
+});
+test('timeout after the second add stops later writes, then verifies both attempted videos once',async()=>{
+ for(const applied of [false,true]){
+  const f=fixture(),p=await directPlan(f,'existing',['1','2','3']);f.options.onRequest=(route,p)=>{if(route==='addCollectionEpisodes'&&p.episodes[0].aid===2){f.options.addTimeout=true;f.options.noAddApply=!applied;}};
+  const before=f.calls.length,result=await f.manager.execute(p.token,{confirmed:true}),calls=f.calls.slice(before);assert.equal(f.posts().length,2);assert.equal(f.store().collectionJobs.imports['1'].state,'verified');assert.equal(f.store().collectionJobs.imports['2'].state,applied?'verified':'unknown');assert(result.some(j=>j.aid==='3'&&j.state==='cancelled'));
+  const first=calls.findIndex(c=>c.route==='addCollectionEpisodes'),last=calls.findLastIndex(c=>c.route==='addCollectionEpisodes');assert(!calls.slice(first+1,last).some(c=>['collections','collectionDetail','collectionSection'].includes(c.route)));assert.equal(countRoutes(calls).collectionSection,2);assert.equal(countRoutes(calls).collectionDetail,1);
+  f.options.addTimeout=false;f.options.noAddApply=false;f.options.onRequest=undefined;await f.manager.execute(p.token,{confirmed:true});assert.equal(f.posts().filter(c=>c.p.episodes[0].aid===2).length,1);assert.equal(f.posts().filter(c=>c.p.episodes[0].aid===3).length,1);
+ }
+});
+test('explicit add rejection stops the remainder and still verifies previously accepted writes',async()=>{
+ const f=fixture(),p=await directPlan(f,'existing',['1','2','3']);f.options.onRequest=(route,p)=>{if(route==='addCollectionEpisodes'&&p.episodes[0].aid===2)f.options.rejectAdd=true;};
+ const r=await f.manager.execute(p.token,{confirmed:true});assert.equal(f.posts().length,2);assert.equal(f.store().collectionJobs.imports['1'].state,'verified');assert.equal(f.store().collectionJobs.imports['2'].state,'rejected');assert(r.some(j=>j.aid==='3'&&j.state==='cancelled'));
+ f.options.onRequest=undefined;f.options.rejectAdd=false;await f.manager.execute(p.token,{confirmed:true});assert.deepEqual(f.posts().map(c=>c.p.episodes[0].aid),[1,2,2,3]);
+});
+test('final verification failure is shared across the target and later pending checks cannot resend',async()=>{
+ const f=fixture(),p=await directPlan(f,'existing',['1','2','3']);f.options.onRequest=route=>route==='collectionDetail'?{http:200,json:{code:-400,message:'核对暂不可用'}}:undefined;
+ const before=f.calls.length,r=await f.manager.execute(p.token,{confirmed:true});assert.equal(f.posts().length,3);assert.equal(countRoutes(f.calls.slice(before)).collectionDetail,1);assert(Object.values(f.store().collectionJobs.imports).every(j=>j.state==='accepted'));assert(r.filter(j=>j.message?.includes('回读未完成')).length===3);
+ f.reload();f.options.onRequest=undefined;const next=f.calls.length,checked=await f.manager.checkPending();assert.equal(checked.length,3);assert(checked.every(j=>j.state==='verified'));assert.equal(f.posts().length,3);assert.equal(countRoutes(f.calls.slice(next)).collectionDetail,1);assert.equal(countRoutes(f.calls.slice(next)).collectionSection,1);
+});
+test('accepted but not yet visible members remain pending after final verification and are never resent',async()=>{
+ const f=fixture({noAddApply:true}),p=await directPlan(f,'existing',['1','2','3']);await f.manager.execute(p.token,{confirmed:true});assert.equal(f.posts().length,3);assert(Object.values(f.store().collectionJobs.imports).every(j=>j.state==='accepted'));
+ const before=f.calls.length;await f.manager.execute(p.token,{confirmed:true});assert.equal(f.posts().length,3);assert.equal(countRoutes(f.calls.slice(before)).collections,undefined);assert.equal(countRoutes(f.calls.slice(before)).collectionSection,1);
+});
+test('stopping after one accepted add still performs one final verification without another write',async()=>{
+ const f=fixture(),p=await directPlan(f,'existing',['1','2','3']),before=f.calls.length;f.options.onAdd=()=>f.manager.stop();const r=await f.manager.execute(p.token,{confirmed:true});assert.equal(f.posts().length,1);assert.equal(f.store().collectionJobs.imports['1'].state,'verified');assert.equal(r.filter(j=>j.state==='cancelled').length,2);assert.equal(countRoutes(f.calls.slice(before)).collectionSection,2);
+});
+test('journal failure after a sent add stops the batch and leaves a recoverable sending record',async()=>{
+ const f=fixture(),p=await directPlan(f,'existing',['1','2','3']);f.options.onAdd=()=>f.options.failWrite=true;const r=await f.manager.execute(p.token,{confirmed:true});assert.equal(f.posts().length,1);assert.equal(f.store().collectionJobs.imports['1'].state,'sending');assert(r.some(j=>j.message?.includes('核对结果未保存')));
+ f.options.failWrite=false;f.options.onAdd=undefined;await f.manager.execute(p.token,{confirmed:true});assert.deepEqual(f.posts().map(c=>c.p.episodes[0].aid),[1,2,3]);assert.equal(f.store().collectionJobs.imports['1'].state,'verified');
+});
+test('switching accounts after an accepted add blocks remaining writes and final membership reads',async()=>{
+ const f=fixture(),p=await directPlan(f,'existing',['1','2']),before=f.calls.length;f.options.onAdd=()=>f.setUID(999);const r=await f.manager.execute(p.token,{confirmed:true});assert.equal(f.posts().length,1);assert.equal(countRoutes(f.calls.slice(before)).collectionDetail,undefined);assert.equal(f.store().collectionJobs.imports['1'].state,'accepted');assert(r.some(j=>j.message?.includes('请切回原账号')));
+ f.setUID(123);f.options.onAdd=undefined;await f.manager.checkPending();assert.equal(f.store().collectionJobs.imports['1'].state,'verified');
+});
+test('final multi-section verification detects a moved member and changed CID without retargeting',async()=>{
+ for(const kind of ['section','cid']){
+  const f=fixture();f.addSeason(10,'已有合集',[100,101]);const p=await directPlan(f,'existing',['1','2']);f.options.onAdd=p=>{if(p.episodes[0].aid!==2)return;if(kind==='cid')f.sections.get('100').episodes[0].cid=999;else{const section=f.sections.get('100');section.episodes.shift();section.section.epCount--;f.seasons.get('10').sections.sections[0].epCount--;f.addMember(101,1);}};
+  await f.manager.execute(p.token,{confirmed:true});assert.equal(f.posts().length,2);assert.equal(f.store().collectionJobs.imports['1'].state,'conflict');assert.equal(f.store().collectionJobs.imports['2'].state,'verified');
+ }
+});
+test('concurrent executions on one manager are refused before requests and do not duplicate adds',async()=>{
+ const f=fixture(),p=await directPlan(f,'existing',['1','2']);let release,entered;const gate=new Promise(r=>release=r),waiting=new Promise(r=>entered=r);let once=true;f.options.onSleep=async()=>{if(once){once=false;entered();await gate;}};
+ const run=f.manager.execute(p.token,{confirmed:true});await waiting;const before=f.calls.length;await assert.rejects(()=>f.manager.execute(p.token,{confirmed:true}),/队列已经在运行/);assert.equal(f.calls.length,before);release();await run;assert.equal(f.posts().length,2);
+});
+test('cross-manager lock contention prevents a second batch from using a competing snapshot',async()=>{
+ const f=fixture(),p=await directPlan(f,'existing',['1','2']),other=new C.CollectionManager(new C.Engine(f.env));const q=await other.preview(await other.prepare(),[{seasonId:10,sectionId:100,aids:['1','2']}]);let locked=false,release,entered;const gate=new Promise(r=>release=r),waiting=new Promise(r=>entered=r);let once=true;
+ f.env.lock=async(_,fn)=>{assert(!locked,'another tab is working');locked=true;try{return await fn();}finally{locked=false;}};f.options.onSleep=async()=>{if(once){once=false;entered();await gate;}};
+ const run=f.manager.execute(p.token,{confirmed:true});await waiting;const before=f.calls.length;await assert.rejects(()=>other.execute(q.token,{confirmed:true}),/another tab/);assert.equal(f.calls.length,before);release();await run;assert.equal(f.posts().length,2);
+ await other.execute(q.token,{confirmed:true});assert.equal(f.posts().length,2);
+});
+test('local snapshot is updated after successful adds so later groups cannot assign those members again',async()=>{
+ const f=fixture();f.addSeason(10,'第一合集',[100]);f.addSeason(20,'第二合集',[200]);const snapshot=await f.manager.membershipSnapshot('123');assert.equal(snapshot.members.size,0);
+ const p=await f.manager.preview(await f.manager.prepare(),[{seasonId:10,sectionId:100,aids:['1']},{seasonId:20,sectionId:200,aids:['2']}]);
+ const original=f.manager.membershipSnapshot.bind(f.manager);let loaded;f.manager.membershipSnapshot=async uid=>{loaded=await original(uid);return loaded;};await f.manager.execute(p.token,{confirmed:true});assert.equal(loaded.members.get('1').seasonId,'10');assert.equal(loaded.members.get('2').seasonId,'20');assert.equal(loaded.collections.find(c=>c.id==='10').sections[0].count,1);
+});
+test('multiple new collections seed empty sections without member reads between add groups',async()=>{
+ const f=fixture();f.addSeason(10,'原有合集',[100]);let next=20;f.options.onRequest=(route,p)=>{if(route!=='createCollection')return;const id=next;next+=10;f.addSeason(id,p.title,[id*10]);return {http:200,json:{code:0,data:id}};};
+ const p=await f.manager.preview(await f.manager.prepare(),[{title:'第一新合集',aids:['1','2']},{title:'第二新合集',aids:['3']}]),before=f.calls.length;
+ await f.manager.execute(p.token,{confirmed:true});const calls=f.calls.slice(before),first=calls.findIndex(c=>c.route==='addCollectionEpisodes'),last=calls.findLastIndex(c=>c.route==='addCollectionEpisodes');
+ assert.equal(countRoutes(calls).collections,1);assert.equal(countRoutes(calls).collectionSection,3);assert(!calls.slice(first+1,last).some(c=>['collections','collectionSection'].includes(c.route)));
+ assert.deepEqual(calls.slice(last+1).filter(c=>c.route==='collectionDetail').map(c=>c.p.id),['20','30']);assert.deepEqual(f.posts().filter(c=>c.route==='addCollectionEpisodes').map(c=>c.p.sectionId),[200,200,300]);
+});
+test('final account read failure preserves every accepted job and reports recovery instead of resending',async()=>{
+ const f=fixture(),p=await directPlan(f,'existing',['1','2']);f.options.onAdd=p=>{if(p.episodes[0].aid===2)f.options.onRequest=route=>route==='nav'?{http:200,json:{code:-400,message:'账号核对暂不可用'}}:undefined;};
+ const r=await f.manager.execute(p.token,{confirmed:true});assert.equal(f.posts().length,2);assert.equal(r.filter(j=>j.message?.includes('账号核对暂不可用')).length,2);assert(Object.values(f.store().collectionJobs.imports).every(j=>j.state==='accepted'));
+ f.options.onRequest=undefined;await f.manager.checkPending();assert(Object.values(f.store().collectionJobs.imports).every(j=>j.state==='verified'));assert.equal(f.posts().length,2);
+});
+test('incomplete final section data never marks any video verified and is read just once per pass',async()=>{
+ const f=fixture();f.addSeason(10,'已有合集',[100,101]);const p=await directPlan(f,'existing',['1','2']);f.options.onAdd=p=>{if(p.episodes[0].aid!==2)return;f.options.onRequest=(route,p)=>{if(route==='collectionSection'&&p.id==='101')return {http:200,json:{code:0,data:{section:{id:101,seasonId:10,epCount:1},episodes:[]}}};};};
+ const before=f.calls.length;await f.manager.execute(p.token,{confirmed:true});assert(Object.values(f.store().collectionJobs.imports).every(j=>j.state==='accepted'));assert.equal(countRoutes(f.calls.slice(before)).collectionSection,4);assert.equal(f.posts().length,2);
+ f.options.onRequest=undefined;await f.manager.checkPending();assert(Object.values(f.store().collectionJobs.imports).every(j=>j.state==='verified'));
+});
+test('preflight partial reads abort before all writes and cannot seed a later execution cache',async()=>{
+ const f=fixture();f.addSeason(10,'已有合集',[100,101]);const p=await directPlan(f,'existing',['1','2']);f.options.onRequest=(route,p)=>route==='collectionSection'&&p.id==='101'?{http:200,json:{code:-400,message:'章节读取失败'}}:undefined;
+ await f.manager.execute(p.token,{confirmed:true});assert.equal(f.posts().length,0);f.options.onRequest=undefined;const before=f.calls.length;await f.manager.execute(p.token,{confirmed:true});assert.equal(f.posts().length,2);assert.equal(countRoutes(f.calls.slice(before)).collectionSection,4);
+});
