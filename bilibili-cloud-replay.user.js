@@ -25,7 +25,7 @@
   'use strict';
   const API = 'https://api.live.bilibili.com/xlive/app-blink/v1/anchorVideo/';
   const NAV = 'https://api.bilibili.com/x/web-interface/nav';
-  const ROUTES = Object.freeze({sessionData:API+'GetLiveSessionData',manuscript:'https://member.bilibili.com/x/vupre/web/archive/view',editManuscript:'https://member.bilibili.com/x/vu/web/edit',replays: API+'AnchorGetReplayList', published: API+'AnchorGetVideoSliceList', streams: API+'GetSliceStream', publish: API+'AnchorPublishVideoSlice', nav: NAV,frames:API+'GetAnchorVideoKeyFrame',upload:'https://api.bilibili.com/x/upload/web/image'});
+  const ROUTES = Object.freeze({collections:'https://member.bilibili.com/x2/creative/web/seasons',collectionDetail:'https://member.bilibili.com/x2/creative/web/season',collectionSection:'https://member.bilibili.com/x2/creative/web/season/section',createCollection:'https://member.bilibili.com/x2/creative/web/season/add',addCollectionEpisodes:'https://member.bilibili.com/x2/creative/web/season/section/episodes/add',sessionData:API+'GetLiveSessionData',manuscript:'https://member.bilibili.com/x/vupre/web/archive/view',editManuscript:'https://member.bilibili.com/x/vu/web/edit',replays: API+'AnchorGetReplayList', published: API+'AnchorGetVideoSliceList', streams: API+'GetSliceStream', publish: API+'AnchorPublishVideoSlice', nav: NAV,frames:API+'GetAnchorVideoKeyFrame',upload:'https://api.bilibili.com/x/upload/web/image'});
   const MAX = 7200, CHUNK = 7190, SETTLE = 300, MAX_PAGES = 250;
   const BLOCKED = new Set(['sending','unknown','accepted','processing','posted','remote_failed','rejected','duplicate']);
   const LABEL = {ready:'待确认',sending:'正在提交',unknown:'结果不明，禁止重发',accepted:'已提交，等待云端处理',processing:'云端处理中',posted:'已投稿，转码审核另查',remote_failed:'云端投稿失败',rejected:'提交被拒绝',duplicate:'已有内容或标题冲突',retry_ready:'待投稿（已重置）'};
@@ -369,12 +369,12 @@
     notify(event) {try {this.env.progress?.(event);} catch (_) {}}
     async call(route,params={},method='GET') {
       assert(Object.hasOwn(ROUTES,route),'接口未列入白名单');
-      assert(method==='GET'||(method==='POST'&&['publish','frames','upload','editManuscript'].includes(route)),'此接口不允许写入');
+      assert(method==='GET'||(method==='POST'&&['publish','frames','upload','editManuscript','createCollection','addCollectionEpisodes'].includes(route)),'此接口不允许写入');
       for(let attempt=0;;attempt++) {
         try {
           if(route==='streams')await this.requestPause(route);
           const transport=this.env.transport?.()||'custom';this.log({route,method,phase:'start',transport,fields:Object.keys(params).filter(k=>!['csrf','csrf_token'].includes(k))});
-          const r=await this.env.request(ROUTES[route],params,method,['frames','editManuscript'].includes(route)?{json:true}:route==='upload'?{multipart:true}:undefined);
+          const r=await this.env.request(ROUTES[route],params,method,['frames','editManuscript','addCollectionEpisodes'].includes(route)?{json:true}:route==='upload'?{multipart:true}:undefined);
           this.log({route,method,http:r.http,code:r.json?.code,transport:r.transport||transport,elapsedMs:r.elapsedMs,traceId:r.traceId||'',message:String(r.json?.message||r.json?.msg||(r.json===null?'非JSON响应':'')).slice(0,300)});
           if(r.http<200 || r.http>=300) throw Object.assign(new Error(`HTTP ${r.http}`),{retryable:r.http===429||r.http>=500});
           assert(r.json && typeof r.json.code==='number','接口响应结构无法识别');
@@ -956,6 +956,231 @@
       });}finally{this.running=false;}
     }
   }
+  // Pure suggestions only: nothing here selects videos, mutates inputs, or writes remotely.
+  function collectionNormalize(text) {
+    return String(text == null ? '' : text).normalize('NFKC').toLowerCase().replace(/\s+/gu, ' ').trim();
+  }
+  function collectionKeywordValid(text) {
+    const key = collectionNormalize(text).replace(/[【】\[\]「」《》()]/gu, '').trim();
+    if (Array.from(key.replace(/[\p{P}\p{S}\s]/gu, '')).length < 2 || key.length > 100 || !/[\p{L}]/u.test(key)) return false;
+    if (/^(?:直播|回放|录播|直播回放|直播录播|合集|视频|直播合集|回放合集|录播合集|完整版|未命名|测试|live|replay)$/u.test(key)) return false;
+    return !/^(?:\d{2,4}[年./-])?\d{1,2}[月./-]\d{1,2}日?$/u.test(key);
+  }
+  function collectionKeywords(title) {
+    const text = collectionNormalize(title), candidates = [];
+    const add = value => { const key = collectionNormalize(value); if (collectionKeywordValid(key) && !candidates.includes(key)) candidates.push(key); };
+    // Bracketed topic labels are useful even when the rest of a title varies.
+    const bracket = /【([^【】]+)】|\[([^\[\]]+)\]|「([^「」]+)」|《([^《》]+)》|\(([^()]+)\)/gu;
+    for (const match of text.matchAll(bracket)) {
+      add(match.slice(1).find(value => value !== undefined));
+      if (candidates.length >= 10) break;
+    }
+    // The publisher generates "topic YYYY-MM-DD NN". Do not strip ordinary
+    // sequel numbers such as Civilization 6, or guess arbitrary common substrings.
+    const topic = text.replace(/\s+\d{4}-\d{2}-\d{2}(?:\s+\d{1,3})?\s*$/u, '').trim();
+    add(topic);
+    const unwrapped = topic.replace(bracket, (_, ...parts) => parts.slice(0, 5).find(value => value !== undefined) || '')
+      .replace(/^(?:直播回放|直播录播|直播|回放|录播)[\s:：|·-]+/u, '')
+      .replace(/[\s:：|·-]*(?:直播回放合集|直播录播合集|直播合集|回放合集|录播合集|直播回放|直播录播|合集)$/u, '').trim();
+    add(unwrapped);
+    return candidates;
+  }
+  function collectionKeywordMatches(title, keyword) {
+    // ASCII word boundaries stop Java matching JavaScript (and Go matching Google),
+    // while Chinese phrases can match naturally without word segmentation.
+    const text = collectionNormalize(title), key = collectionNormalize(keyword);
+    if (!key) return false;
+    let from = 0, at;
+    while ((at = text.indexOf(key, from)) !== -1) {
+      const left = text[at - 1] || '', right = text[at + key.length] || '';
+      if ((!/[a-z0-9_]/u.test(key[0]) || !/[a-z0-9_]/u.test(left)) &&
+          (!/[a-z0-9_]/u.test(key[key.length - 1]) || !/[a-z0-9_]/u.test(right))) return true;
+      from = at + key.length;
+    }
+    return false;
+  }
+  function suggestCollections(videos, collections, rules = []) {
+    const id = value => /^\d+$/u.test(String(value)) && /[1-9]/u.test(String(value)) ? String(value).replace(/^0+/u, '') : null;
+    const assigned = new Set(), unique = new Map(), groups = new Map(), covered = new Set();
+    for (const video of videos || []) {
+      if (!video || !id(video.aid)) continue;
+      const aid = id(video.aid);
+      // Conflicting duplicate rows are excluded conservatively if any reports membership.
+      if (id(video.seasonId) || id(video.season_id)) assigned.add(aid);
+      if (!unique.has(aid)) unique.set(aid, video);
+    }
+    for (const aid of assigned) unique.delete(aid);
+    const targets = new Map();
+    for (const collection of collections || []) if (collection && id(collection.id)) targets.set(id(collection.id), collection);
+    const add = (keyword, title, seasonId, source) => {
+      const key = collectionNormalize(keyword);
+      if (!collectionKeywordValid(key)) return;
+      const groupKey = JSON.stringify([source, seasonId, key]);
+      if (groups.has(groupKey)) return;
+      groups.set(groupKey, { key: groupKey, keyword: key, title: String(title || keyword), seasonId, source, aids: [], videos: [] });
+      if (source !== 'inferred') covered.add(key);
+    };
+    for (const [seasonId, collection] of targets) {
+      for (const keyword of collectionKeywords(collection.title)) add(keyword, collection.title, seasonId, 'existing');
+    }
+    for (const rule of rules || []) {
+      if (!rule || !collectionKeywordValid(rule.keyword)) continue;
+      const hasTarget = rule.seasonId != null && String(rule.seasonId).trim() !== '' && String(rule.seasonId) !== '0';
+      const seasonId = hasTarget ? id(rule.seasonId) : null;
+      if (hasTarget && (!seasonId || !targets.has(seasonId))) continue; // Stale rules must not create a new collection.
+      add(rule.keyword, seasonId ? targets.get(seasonId).title : (rule.title || rule.keyword), seasonId, 'rule');
+    }
+    for (const video of unique.values()) {
+      for (const keyword of collectionKeywords(video.title)) if (!covered.has(keyword)) add(keyword, keyword, null, 'inferred');
+    }
+    for (const group of groups.values()) {
+      for (const [aid, video] of unique) if (collectionKeywordMatches(video.title, group.keyword)) {
+        group.aids.push(aid); group.videos.push(video);
+      }
+    }
+    return [...groups.values()].filter(group => group.aids.length >= (group.source === 'inferred' ? 2 : 1));
+  }
+
+  // Creator seasons (合集), not series/playlists. Only explicit preview execution writes.
+  const COLLECTION_LABEL={ready:'待确认',sending:'正在提交',verified:'已回读确认',accepted:'已受理，等待回读',unknown:'结果不明，禁止重发',rejected:'服务器拒绝，可重试',conflict:'内容变化，请重新预览',failed:'发送前失败',cancelled:'已停止后续',unchanged:'已在目标合集中'};
+  function collectionNumber(value){const n=Number(collectionID(value));assert(Number.isSafeInteger(n),'标识超出安全范围，停止提交');return n;}
+  function collectionID(value,label='合集标识'){assert(typeof value!=='number'||Number.isSafeInteger(value),label+'超出安全范围');const id=String(value??'');assert(/^[1-9]\d*$/.test(id),label+'无效');return id;}
+  function collectionDetail(data,uid,id){
+    const s=data?.season;assert(s&&String(s.mid)===String(uid),'合集归属无法确认');
+    const seasonId=collectionID(s.id);assert(!id||seasonId===String(id),'返回合集ID不一致');assert(typeof s.title==='string'&&s.title.trim(),'合集名称缺失');
+    const sections=data.sections?.sections;assert(Array.isArray(sections),'合集章节结构无法识别');const seen=new Set();
+    const result=sections.map(section=>{const sid=collectionID(section.id,'章节标识');assert(String(section.seasonId)===seasonId&&!seen.has(sid),'章节归属或重复标识异常');seen.add(sid);assert(Number.isInteger(section.epCount)&&section.epCount>=0,'章节视频数量无法识别');return {id:sid,title:String(section.title||'未命名章节'),count:section.epCount};});
+    return {id:seasonId,title:s.title,description:typeof s.desc==='string'?s.desc:'',cover:s.cover||'',sections:result};
+  }
+  function collectionSection(data,seasonId,sectionId){
+    const s=data?.section;assert(s&&String(s.id)===String(sectionId)&&String(s.seasonId)===String(seasonId),'章节归属不一致');
+    assert(Number.isInteger(s.epCount)&&s.epCount>=0,'章节视频数量无法识别');const list=data.episodes===null&&s.epCount===0?[]:data.episodes;
+    assert(Array.isArray(list)&&list.length===s.epCount,'合集成员未完整返回，停止操作');const seen=new Set();
+    return list.map(e=>{const aid=collectionID(e.aid,'稿件ID');assert(String(e.seasonId)===String(seasonId)&&String(e.sectionId)===String(sectionId)&&!seen.has(aid),'合集成员归属或重复标识异常');seen.add(aid);return {aid,cid:collectionID(e.cid,'视频CID')};});
+  }
+  function collectionVideo(data,aid,uid){
+    const d=manuscriptData(data,{aid:String(aid)},String(uid)),a=d.archive;
+    assert(a.state===0,'稿件尚未公开审核通过，不能加入合集');assert(d.videos.length===1,'多P视频请在创作中心处理');assert(!Number(a.interactive),'互动视频不能导入合集');
+    collectionNumber(a.aid);collectionNumber(d.videos[0].cid);
+    const season=a.season_id??d.season_id??d.ugc_season?.id;assert(season===undefined||/^\d+$/.test(String(season)),'稿件合集信息无法识别');
+    return {aid:String(a.aid),cid:collectionID(d.videos[0].cid,'视频CID'),title:a.title,cover:coverURL(a.cover),seasonId:season===undefined?null:String(season)==='0'?'':String(season)};
+  }
+  function collectionCreateBody(item,csrf){
+    assert(typeof item.title==='string'&&item.title.trim()&&!/[\u0000-\u001f\u007f]/.test(item.title),'合集名称不能为空或包含控制字符');
+    assert(typeof item.description==='string'&&!/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(item.description),'合集简介须为文字且不能包含控制字符');assert(/^[0-9a-f]{32}$/i.test(csrf),'未取得有效CSRF');
+    return {title:item.title.trim(),desc:item.description,cover:coverURL(item.cover),season_price:0,csrf};
+  }
+  class CollectionManager {
+    constructor(engine){this.engine=engine;this.env=engine.env;this.plans=new Map();this.running=false;this.stopped=false;}
+    stop(){this.stopped=true;}
+    async list(){
+      const uid=await this.engine.account();return {uid,collections:await this.listFor(uid)};
+    }
+    async listFor(uid){
+      const out=[],seen=new Set();let total=null;const ps=30;
+      for(let pn=1;pn<=MAX_PAGES;pn++){
+        const data=await this.engine.call('collections',{pn,ps});assert(data&&Number.isInteger(data.total)&&data.total>=0&&(Array.isArray(data.seasons)||(data.seasons===null&&data.total===0)),'合集列表结构无法识别');
+        if(total===null)total=data.total;assert(total===data.total,'合集分页发生变化，请重新读取');const rows=data.seasons||[];assert(rows.length===Math.min(ps,Math.max(0,total-out.length)),'合集分页未完整返回');
+        for(const row of rows){const c=collectionDetail(row,uid);assert(!seen.has(c.id),'合集分页重复，请重新读取');seen.add(c.id);out.push(c);}if(out.length===total)return out;
+        await this.env.sleep(200);
+      }throw new Error('合集分页超过安全上限');
+    }
+    async detail(id,uid){return collectionDetail(await this.engine.call('collectionDetail',{id}),uid,id);}
+    async members(collection){
+      const members=new Map();for(const section of collection.sections){const rows=collectionSection(await this.engine.call('collectionSection',{id:section.id}),collection.id,section.id);assert(rows.length===section.count,'读取期间合集成员发生变化，请重新读取');for(const row of rows){assert(!members.has(row.aid),'同一稿件重复出现在多个章节');members.set(row.aid,{...row,sectionId:section.id});}}
+      return members;
+    }
+    async membershipMap(uid,collections){
+      const out=new Map();for(const c of collections||await this.listFor(uid))for(const [aid,member]of await this.members(c)){assert(!out.has(aid),'同一稿件出现在多个合集，请人工核对');out.set(aid,{...member,seasonId:c.id});}return out;
+    }
+    async prepare(){
+      assert(!this.running,'合集队列正在运行');const {uid,collections}=await this.list(),members=new Map();
+      for(const c of collections)for(const aid of (await this.members(c)).keys()){assert(!members.has(aid),'同一稿件出现在多个合集，请到创作中心核对');members.set(aid,c.id);}
+      const rows=await this.engine.list('published'),videos=[],seen=new Set();let skipped=0;
+      for(const r of rows){const aid=String(r.avid||'');if(Number(r.av_status)!==2||!/^[1-9]\d*$/.test(aid)){skipped++;continue;}if(seen.has(aid))continue;seen.add(aid);videos.push({aid,title:String(r.av_title||''),seasonId:members.get(aid)||''});}
+      assert(await this.engine.account()===uid,'账号已改变，请重新读取');return {uid,collections,videos,skipped};
+    }
+    async preview(session,choices){
+      assert(!this.running,'合集队列正在运行');assert(await this.engine.account()===session.uid,'账号已改变，请重新读取');assert(Array.isArray(choices)&&choices.length,'请选择至少一个合集分组');
+      const seen=new Set(),targets=new Set(),items=[];
+      for(const choice of choices){
+        assert(Array.isArray(choice.aids)&&choice.aids.length,'每个分组至少选择一个视频');const target=choice.seasonId?session.collections.find(c=>c.id===String(choice.seasonId)):null;
+        assert(!choice.seasonId||target,'目标合集不在本次读取列表');const title=target?.title||String(choice.title||'').trim(),key=target?'season:'+target.id:'new:'+collectionNormalize(title);
+        assert(!targets.has(key),'同一目标合集只保留一个分组');targets.add(key);
+        assert(target||!session.collections.some(c=>collectionNormalize(c.title)===collectionNormalize(title)),'已有同名合集，请选择现有合集');
+        const section=target?.sections.find(s=>s.id===String(choice.sectionId));assert(!target||section,'请选择目标章节');const videos=[];
+        for(const raw of choice.aids){const aid=collectionID(raw,'稿件ID'),source=session.videos.find(v=>v.aid===aid);assert(source&&!source.seasonId,'稿件未在可导入列表中，或已属于合集');assert(!seen.has(aid),'同一视频匹配多个分组，请只保留一个目标');seen.add(aid);
+          const video=collectionVideo(await this.engine.call('manuscript',{aid}),aid,session.uid);assert(!video.seasonId,'稿件已属于合集，请重新读取');videos.push(video);
+        }
+        const item={key,seasonId:target?.id||'',sectionId:section?.id||'',title,description:String(choice.description||''),cover:videos[0].cover,videos};if(!target)collectionCreateBody(item,'a'.repeat(32));items.push(item);
+      }
+      const token='collection-'+crypto.randomUUID(),plan={uid:session.uid,items};this.plans.set(token,structuredClone(plan));return {token,...structuredClone(plan)};
+    }
+    async reconcileImport(job,uid){
+      try{const c=await this.detail(job.seasonId,uid),member=(await this.members(c)).get(job.aid);if(member&&member.sectionId===job.sectionId&&member.cid===job.cid){job.state='verified';job.message='稿件已在目标章节';}else if(member){job.state='conflict';job.message='稿件位于其他章节或分P已变化，请人工核对';}}
+      catch(error){job.message='回读未完成：'+error.message;}return job;
+    }
+    async execute(token,{confirmed=false,checkOnly=false,progress=()=>{}}={}){
+      assert(confirmed||checkOnly,'需要明确确认后才能创建或导入');assert(!this.running,'合集队列已经在运行');const plan=this.plans.get(token);assert(plan,'预览已失效');this.running=true;this.stopped=false;const results=[],report=job=>{const copy=structuredClone(job);results.push(copy);try{progress(copy);}catch(_){}};
+      try{return await this.env.lock(plan.uid,async()=>{
+        assert(await this.engine.account()===plan.uid,'登录账号已改变，请重新读取');const ledger=await this.engine.load(plan.uid);ledger.collectionJobs||={version:1,creations:{},imports:{}};const book=ledger.collectionJobs;assert(book.version===1&&book.creations&&book.imports,'合集账本格式错误');
+        const save=()=>this.engine.write(plan.uid,ledger),pause=async()=>{await this.env.sleep(Math.max(1000,requestIntervalMs(this.env.interval?.())));assert(await this.engine.account()===plan.uid,'登录账号已改变，已停止写入');};
+        for(const item of plan.items){
+          if(this.stopped){report({key:item.key,state:'cancelled'});continue;}let seasonId=item.seasonId,sectionId=item.sectionId;
+          // Pending writes belong to their original intent, even after reopening or renaming.
+          const pending=item.videos.map(v=>book.imports[v.aid]).filter(j=>j&&['sending','accepted','unknown'].includes(j.state));
+          if(!seasonId&&pending.length){for(const job of pending){if(job.state==='sending')job.state='unknown';await this.reconcileImport(job,plan.uid);report(job);}await save();continue;}
+          if(!seasonId){
+            const unresolved=Object.values(book.creations).find(j=>['sending','unknown'].includes(j.state)&&!j.seasonId&&(j.key===item.key||!Array.isArray(j.aids)||j.aids.some(aid=>item.videos.some(v=>v.aid===aid))));
+            if(unresolved){unresolved.state='unknown';unresolved.message='存在结果不明的创建，请到创作中心核对；改名也不会再次创建。若已创建，请重新读取后选择已有合集。';await save();report(unresolved);continue;}
+            let job=book.creations[item.key];
+            if(job&&['sending','unknown'].includes(job.state)&&!job.seasonId){job.state='unknown';job.message='创建结果不明。请到创作中心核对；若已创建，重新读取后手动选择该合集，不会再次创建。';await save();report(job);continue;}
+            if(job?.seasonId){seasonId=job.seasonId;}
+            else if(checkOnly){report(job||{key:item.key,state:'ready'});continue;}
+            else{
+              job={key:item.key,title:item.title,aids:item.videos.map(v=>v.aid),state:'ready'};book.creations[item.key]=job;
+              try{
+                await pause();if(this.stopped){report({...job,state:'cancelled'});continue;}
+                const list=await this.listFor(plan.uid),membership=await this.membershipMap(plan.uid,list);assert(item.videos.every(v=>!membership.has(v.aid)),'稿件已加入合集，请重新读取');assert(!list.some(c=>collectionNormalize(c.title)===collectionNormalize(item.title)),'已有同名合集，请重新读取并选择该合集');
+                // Validate every video before creating an otherwise empty collection.
+                for(const v of item.videos){const current=collectionVideo(await this.engine.call('manuscript',{aid:v.aid}),v.aid,plan.uid);assert(stableJSON(current)===stableJSON(v),'稿件已变化，请重新生成预览');}
+                assert(await this.engine.account()===plan.uid,'登录账号已改变，停止创建');const body=collectionCreateBody(item,this.env.csrf());if(this.stopped){report({...job,state:'cancelled'});continue;}job.state='sending';await save();if(this.stopped){job.state='cancelled';await save();report(job);continue;}
+                try{const id=await this.engine.call('createCollection',body,'POST');job.seasonId=collectionID(id,'创建返回的合集ID');job.state='accepted';seasonId=job.seasonId;}
+                catch(error){job.state=error.apiCode!==undefined?'rejected':'unknown';job.message=error.message;}await save();
+              }catch(error){if(job.state==='ready')job.state='failed';job.message=error.message;}report(job);if(!seasonId)continue;
+            }
+            try{const c=await this.detail(seasonId,plan.uid);assert(c.title===item.title,'新建合集名称已变化，请重新读取');assert(c.sections.length===1,'新建合集没有唯一默认章节，请重新读取并手动选择章节');sectionId=c.sections[0].id;job.state='verified';await save();}
+            catch(error){report({key:item.key,state:'accepted',seasonId,message:'合集可能已创建，未继续导入：'+error.message});continue;}
+          }
+          for(const v of item.videos){
+            if(this.stopped){report({key:item.key,aid:v.aid,state:'cancelled'});continue;}let job=book.imports[v.aid];
+            if(job?.token===token&&['verified','unchanged'].includes(job.state)){report(job);continue;}
+            if(job&&['sending','unknown','accepted'].includes(job.state)){if(job.state==='sending')job.state='unknown';await this.reconcileImport(job,plan.uid);await save();report(job);continue;}
+            if(checkOnly){if(job)await this.reconcileImport(job,plan.uid);await save();report(job||{key:item.key,aid:v.aid,state:'ready'});continue;}
+            job={key:item.key,token,aid:v.aid,cid:v.cid,seasonId,sectionId,state:'ready'};book.imports[v.aid]=job;
+            try{
+              await pause();if(this.stopped){report({...job,state:'cancelled'});continue;}const c=await this.detail(seasonId,plan.uid);assert(c.title===item.title&&c.sections.some(s=>s.id===sectionId),'合集或章节已变化，请重新读取');
+              const members=await this.members(c),existing=members.get(v.aid);if(existing){assert(existing.sectionId===sectionId&&existing.cid===v.cid,'稿件已在其他章节或分P已变化');job.state='unchanged';await save();report(job);continue;}
+              const elsewhere=(await this.membershipMap(plan.uid)).get(v.aid);assert(!elsewhere,'稿件已加入合集，请重新读取，不会移动成员');
+              const current=collectionVideo(await this.engine.call('manuscript',{aid:v.aid}),v.aid,plan.uid);assert(stableJSON(current)===stableJSON(v),'稿件标题、视频或合集归属已变化，请重新预览');
+              assert(await this.engine.account()===plan.uid,'登录账号已改变，停止导入');const csrf=this.env.csrf();assert(/^[0-9a-f]{32}$/i.test(csrf),'未取得有效CSRF');if(this.stopped){report({...job,state:'cancelled'});continue;}
+              job.state='sending';await save();if(this.stopped){job.state='cancelled';await save();report(job);continue;}
+              try{await this.engine.call('addCollectionEpisodes',{sectionId:collectionNumber(sectionId),episodes:[{aid:collectionNumber(v.aid),cid:collectionNumber(v.cid),title:v.title,charging_pay:0}],csrf},'POST');job.state='accepted';}
+              catch(error){job.state=error.apiCode!==undefined?'rejected':'unknown';job.message=error.message;}await save();
+              if(['accepted','unknown'].includes(job.state)){await this.reconcileImport(job,plan.uid);await save();}
+            }catch(error){if(job.state==='ready')job.state='failed';job.message=error.message;}report(job);
+          }
+        }return results;
+      });}finally{this.running=false;}
+    }
+    async checkPending(progress=()=>{}){
+      assert(!this.running,'合集队列正在运行');const uid=await this.engine.account();return this.env.lock(uid,async()=>{const ledger=await this.engine.load(uid),book=ledger.collectionJobs;const results=[];if(!book)return results;
+        for(const job of Object.values(book.creations)){if(['sending','accepted','unknown'].includes(job.state)){if(job.state==='sending')job.state='unknown';if(job.seasonId){try{await this.detail(job.seasonId,uid);job.state='verified';}catch(error){job.message=error.message;}}else job.message='创建结果不明，请到创作中心核对后重新读取并选择已有合集；不会再次创建。';results.push(structuredClone(job));progress(structuredClone(job));}}
+        for(const job of Object.values(book.imports)){if(!['sending','accepted','unknown'].includes(job.state))continue;if(job.state==='sending')job.state='unknown';await this.reconcileImport(job,uid);results.push(structuredClone(job));progress(structuredClone(job));}await this.engine.write(uid,ledger);return results;
+      });
+    }
+  }
+
   function createListPageTracker(now=()=>performance.now()) {
     const native={},own=[];
     function parse(raw){
@@ -973,7 +1198,7 @@
       }return changed;}
     };
   }
-  const core={createListPageTracker,cutTime,cutClock,parseDanmakuASS,minuteBuckets,validateCuts,splitAround,assURL,createASSReader,ManuscriptEditor,EDIT_LABEL,bracketTags,uniqueTags,stableJSON,manuscriptIdentity,manuscriptData,manuscriptFields,editTarget,editPayload,imageFailure,normalizeImage,stableCover,publishCoverURL,checkedImage,createImageReader,requestIntervalMs,createRequestTransport,validateTitleDrafts,parseCardDuration,matchPublishedCard,reversePublication,indexPublications,publicationInfo,relatedPublications,statusTone,randomFrameTimestamp,frameSelection,CACHE_POLICY,cleanStreams,sessionCoverage,matchSession,Engine,ROUTES,MAX,CHUNK,parseJSON,time,stamp,date,duration,title,makeClips,assignDailyNumbers,remoteConflict,payload};
+  const core={CollectionManager,COLLECTION_LABEL,collectionDetail,collectionSection,collectionVideo,collectionCreateBody,collectionNormalize,collectionKeywords,suggestCollections,createListPageTracker,cutTime,cutClock,parseDanmakuASS,minuteBuckets,validateCuts,splitAround,assURL,createASSReader,ManuscriptEditor,EDIT_LABEL,bracketTags,uniqueTags,stableJSON,manuscriptIdentity,manuscriptData,manuscriptFields,editTarget,editPayload,imageFailure,normalizeImage,stableCover,publishCoverURL,checkedImage,createImageReader,requestIntervalMs,createRequestTransport,validateTitleDrafts,parseCardDuration,matchPublishedCard,reversePublication,indexPublications,publicationInfo,relatedPublications,statusTone,randomFrameTimestamp,frameSelection,CACHE_POLICY,cleanStreams,sessionCoverage,matchSession,Engine,ROUTES,MAX,CHUNK,parseJSON,time,stamp,date,duration,title,makeClips,assignDailyNumbers,remoteConflict,payload};
   if(typeof module==='object'&&module.exports) {module.exports=core;return;}
   if(window.top!==window.self) return;
   const env={
@@ -1079,7 +1304,7 @@
   const manuscriptEditor=new ManuscriptEditor(engine);
   let editLayer=null;
   function openManuscriptEditor(infos){
-    if(active||editLayer?.isConnected)return;
+    if(active||editLayer?.isConnected||collectionLayer?.isConnected)return;
     const layer=el('div'),shadow=layer.attachShadow({mode:'open'}),dialog=el('dialog'),style=el('style');editLayer=layer;
     style.textContent=`dialog{box-sizing:border-box;width:min(900px,94vw);max-height:90vh;border:1px solid #ccdbe7;border-radius:12px;padding:22px;color:#243b50;font:14px/1.6 system-ui;background:#fff}dialog::backdrop{background:#10243d70}h2{margin-top:0}button,input,textarea,select{font:inherit}button{cursor:pointer;padding:6px 12px;margin:4px;border:1px solid #b9cedb;border-radius:6px;background:#f4f9fc;color:#176589}button:disabled{opacity:.5;cursor:default}input:not([type=checkbox]),textarea{box-sizing:border-box;width:100%;padding:7px;border:1px solid #bdcdd9;border-radius:5px}textarea{min-height:70px}label{display:block;margin:8px 0}fieldset{margin:12px 0;border:1px solid #d5e1ea;border-radius:7px}pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#f2f6f9;padding:12px}.status{color:#9c4d12}.actions{position:sticky;bottom:0;background:white;padding:8px 0}.candidates label{display:inline-flex;gap:5px;margin-right:12px}.candidates input[type=text]{width:150px}.hint{color:#586d7d;font-size:12px}`;
     const heading=el('h2',infos.length===1?'继续编辑稿件':'历史投稿批量编辑'),hint=el('p',infos.length===1?'打开后自动读取最新稿件，再预览修改。保存可能触发重新审核；“已投稿”不代表审核通过。':'先选择稿件并读取最新信息，再预览修改。保存可能触发重新审核；“已投稿”不代表审核通过。'),content=el('div'),notice=el('p','','status'),actions=el('div',undefined,'actions');notice.setAttribute('role','status');
@@ -1133,6 +1358,52 @@
     renderBusy();
     if(infos.length===1&&choices[0].valid)void loadSelected();
   }
+  const collectionManager=new CollectionManager(engine);
+  let collectionLayer=null,cancelCollection=null;
+  function openCollectionManager(){
+    if(active||collectionLayer?.isConnected||editLayer?.isConnected||reviewLayer?.isConnected||timingLayer?.isConnected)return;
+    const layer=el('div'),shadow=layer.attachShadow({mode:'open'}),dialog=el('dialog'),style=el('style');collectionLayer=layer;
+    style.textContent=`dialog{box-sizing:border-box;width:min(940px,94vw);max-height:90vh;border:1px solid #c9dbe7;border-radius:12px;padding:20px;font:14px/1.6 system-ui;color:#243b50;background:white}dialog::backdrop{background:#10243d70}h2{margin-top:0}button,input,textarea,select{font:inherit}button{padding:6px 12px;margin:4px;border:1px solid #b9cedb;border-radius:6px;cursor:pointer;background:#f4f9fc;color:#176589}button:disabled{opacity:.5;cursor:default}fieldset{min-width:0;border:1px solid #d5e1ea;border-radius:8px;margin:12px 0}label{display:block;margin:7px 0}input:not([type=checkbox]),select,textarea{box-sizing:border-box;max-width:100%;width:100%;padding:6px;border:1px solid #bdcdd9;border-radius:5px}textarea{min-height:65px}small,.hint{color:#586d7d}.status{color:#9c4d12;overflow-wrap:anywhere}.actions{position:sticky;bottom:0;background:white;padding:8px 0}.group-videos{max-height:240px;overflow:auto}.group-videos label{overflow-wrap:anywhere}.preview{white-space:pre-wrap;overflow-wrap:anywhere;background:#f2f6f9;padding:12px}.cover{max-width:200px;max-height:115px;object-fit:contain}`;
+    const notice=el('p','正在读取全部云端回放投稿与已有合集…','status'),summary=el('p'),controls=el('div'),content=el('div'),previewBox=el('div'),resultsBox=el('div'),actions=el('div',undefined,'actions');notice.setAttribute('role','status');resultsBox.setAttribute('role','log');
+    const transportLabel=el('label','请求方式'),transport=el('select');transport.setAttribute('aria-label','合集请求方式');for(const [value,text]of [['page-fetch','页面 fetch'],['extension-http','扩展 HTTP']]){const option=el('option',text);option.value=value;transport.append(option);}transport.value=env.transport();transportLabel.append(transport);
+    dialog.append(el('h2','投稿合集管理'),el('p','只处理本工具的云端回放投稿。先读取和匹配，再勾选分组、核对视频并生成预览；只有确认后才创建合集或添加视频。不会移动、删除已有合集成员。'),transportLabel,summary,controls,content,notice,previewBox,resultsBox,actions);shadow.append(style,dialog);document.body.append(layer);dialog.showModal();
+    let busy=false,preview=null,session=null,entries=[],rules=[];
+    const close=()=>{if(busy){collectionManager.stop();notice.textContent='已停止后续操作，请等当前请求完成后关闭。';return;}layer.remove();collectionLayer=null;cancelCollection=null;renderBusy();queueInline();};cancelCollection=close;dialog.oncancel=e=>{e.preventDefault();close();};
+    button('关闭',close,actions);const stop=button('停止后续',()=>{collectionManager.stop();notice.textContent='已请求停止；当前请求无法撤销。';},actions);stop.disabled=true;
+    function invalidate(){preview=null;previewBox.replaceChildren();save.disabled=true;notice.textContent='选择或草稿已变化，请重新生成预览。';}
+    function updateDisabled(){for(const entry of entries){const enabled=entry.enabled.checked;for(const node of entry.fields)node.disabled=busy||!enabled;entry.section.disabled=busy||!enabled||!entry.target.value;entry.title.disabled=busy||!enabled||!!entry.target.value;entry.description.disabled=busy||!enabled||!!entry.target.value;}}
+    function setBusy(value){busy=value;active=value;for(const node of dialog.querySelectorAll('input,textarea,select,button'))node.disabled=value;stop.disabled=!value;save.disabled=value||!preview;previewButton.disabled=value||!session;updateDisabled();renderBusy();}
+    async function work(fn){if(busy)return;setBusy(true);try{await fn();}catch(error){notice.textContent=error.message;}finally{setBusy(false);if(!inRoute())close();}}
+    transport.onchange=()=>{GM_setValue('request-mode-v1',transport.value);invalidate();};
+    const show=job=>{const p=el('p',(job.aid?'av'+job.aid:job.title||'合集')+'：'+(COLLECTION_LABEL[job.state]||job.state)+(job.message?' · '+job.message:''),'status');resultsBox.append(p);};
+    const save=button('确认创建并导入 / 追加',()=>work(async()=>{const current=preview;if(!current)return;resultsBox.replaceChildren();const results=await collectionManager.execute(current.token,{confirmed:true,progress:show});notice.textContent=`本次返回 ${results.length} 项结果。已受理、结果不明只会核对，明确拒绝可再次确认重试；完成后重新读取可识别新投稿。`;}),actions);save.disabled=true;
+    const previewButton=button('生成合集变更预览',()=>work(async()=>{
+      const choices=entries.filter(e=>e.enabled.checked).map(e=>({seasonId:e.target.value,sectionId:e.section.value,title:e.title.value,description:e.description.value,aids:e.videos.filter(v=>v.input.checked).map(v=>v.video.aid)}));
+      invalidate();notice.textContent='正在核对所选稿件归属、审核状态与分P…';preview=await collectionManager.preview(session,choices);previewBox.replaceChildren();
+      for(const item of preview.items){const block=el('div',undefined,'preview');block.append(el('strong',item.seasonId?'追加到已有合集：'+item.title:'创建免费合集：'+item.title));if(item.seasonId)block.append(el('p',`合集 ${item.seasonId} · 章节 ${item.sectionId}`));else{block.append(el('p','简介：'+(item.description||'（空）')+'\n封面复用下方第一条稿件的B站封面（不上传新图片）。'));const image=el('img');image.className='cover';image.alt='新合集封面预览';image.src=item.cover;block.append(image);}for(const v of item.videos)block.append(el('p',`+ av${v.aid} · ${v.title}`));previewBox.append(block);}
+      notice.textContent='请核对全部目标、标题、封面与视频。确认将创建合集并逐条导入；创建或加入可能触发平台审核。';
+    }),actions);previewButton.disabled=true;
+    button('只核对未完成结果',()=>work(async()=>{resultsBox.replaceChildren();const results=await collectionManager.checkPending(show);notice.textContent=results.length?'核对完成；没有再次创建或导入。':'没有待核对的导入记录。';}),actions);
+    button('重新读取投稿与合集',()=>load(),controls);link('到创作中心核对','https://member.bilibili.com/platform/upload-manager/article',controls);
+    function inputField(parent,label,value='',tag='input'){const wrap=el('label',label),input=el(tag);input.value=value;input.setAttribute('aria-label',label);input.oninput=invalidate;wrap.append(input);parent.append(wrap);return input;}
+    function renderGroups(){
+      content.replaceChildren();entries=[];invalidate();const groups=suggestCollections(session.videos,session.collections,rules);summary.textContent=`已读取 ${session.videos.length} 份稿件、${session.collections.length} 个合集；${session.videos.filter(v=>v.seasonId).length} 份已在合集，${session.skipped} 条处理中/失败/无稿件ID记录跳过。`;
+      const ruleBox=el('fieldset');ruleBox.append(el('legend','自定义关键词（仅本窗口）'));const keyword=inputField(ruleBox,'关键词'),target=inputField(ruleBox,'关键词目标','','select'),newOption=el('option','新建合集');newOption.value='';target.append(newOption);for(const c of session.collections){const o=el('option',c.title+' · '+c.id);o.value=c.id;target.append(o);}button('按关键词增加分组',()=>{try{assert(collectionKeywordValid(keyword.value),'请填写至少两个字符、有实际主题含义的关键词');rules.push({keyword:keyword.value,seasonId:target.value,title:keyword.value.trim()});renderGroups();}catch(error){notice.textContent=error.message;}},ruleBox);content.append(ruleBox);
+      if(!groups.length)content.append(el('p','未发现重复主题或现有合集匹配。可输入自定义关键词；已在合集中或尚未发布的稿件不会列入候选。'));
+      groups.forEach((group,index)=>{
+        const box=el('fieldset',undefined,'collection-group'),legend=el('legend'),enabled=el('input');enabled.type='checkbox';enabled.setAttribute('aria-label','选择合集分组 '+(index+1));const label=el('label');label.append(enabled,document.createTextNode(`${group.seasonId?'追加已有合集':'新建合集候选'}：${group.title} · ${group.aids.length} 个视频`));legend.append(label);box.append(legend,el('p','匹配关键词：'+group.keyword+'。可能和其他分组重叠，同一视频只能保留一个目标。','hint'));
+        const target=inputField(box,'目标合集 · 分组'+(index+1),'','select'),newOpt=el('option','新建合集');newOpt.value='';target.append(newOpt);for(const c of session.collections){const o=el('option',c.title+' · '+c.id);o.value=c.id;target.append(o);}target.value=group.seasonId||'';
+        const title=inputField(box,'合集名称 · 分组'+(index+1),group.title),description=inputField(box,'合集简介 · 分组'+(index+1),'','textarea'),section=inputField(box,'目标章节 · 分组'+(index+1),'','select'),list=el('div',undefined,'group-videos'),videos=[];
+        for(const video of group.videos){const label=el('label'),input=el('input');input.type='checkbox';input.checked=true;input.setAttribute('aria-label',`导入 av${video.aid} · 分组${index+1}`);input.onchange=invalidate;label.append(input,document.createTextNode(` av${video.aid} · ${video.title}`));list.append(label);videos.push({video,input});}
+        const entry={enabled,target,title,description,section,videos,fields:[target,title,description,section,...videos.map(v=>v.input)]};entries.push(entry);
+        function sections(){section.replaceChildren();const c=session.collections.find(c=>c.id===target.value);if(c){title.value=c.title;for(const s of c.sections){const o=el('option',s.title+' · '+s.count+' 个视频');o.value=s.id;section.append(o);}if(c.sections.length!==1){const o=el('option','请选择章节');o.value='';section.prepend(o);section.value='';}}updateDisabled();}
+        target.onchange=()=>{sections();invalidate();};enabled.onchange=()=>{updateDisabled();invalidate();};section.onchange=invalidate;sections();box.append(list);content.append(box);
+      });updateDisabled();notice.textContent=`找到 ${groups.length} 个候选分组，默认不选中。勾选需要处理的分组，再核对视频。`;
+    }
+    function load(){return work(async()=>{invalidate();notice.textContent='正在完整读取云端回放投稿、合集和所有章节成员…';session=null;session=await collectionManager.prepare();rules=rules.filter(r=>!r.seasonId||session.collections.some(c=>c.id===r.seasonId));renderGroups();});}
+    void load();
+  }
+
   function sessionPublications(s){const rows=new Map((s.publications||[]).map(p=>[p.sliceId,p]));for(const c of plan?.clips.filter(c=>c.liveKey===s.liveKey)||[])for(const p of c.publications||[])rows.set(p.sliceId,p);return [...rows.values()];}
   function saveLayout(){GM_setValue('ui-v2',JSON.stringify(layout));}
   function applyLayout() {
@@ -1250,6 +1521,7 @@
   }
   function renderTasks() {
     if(!root)return;const area=root.querySelector('.tasks-view');area.replaceChildren();
+    button('投稿合集管理…',openCollectionManager,area).disabled=active;
     button('历史投稿批量编辑…',()=>openManuscriptEditor(plan?.published||[]),area).disabled=active||!plan?.published?.length;
     const tasks=Object.values(ledger.tasks).filter(t=>t.clip&&Number(t.attempts)>0).sort((a,b)=>(b.updated||0)-(a.updated||0));
     if(!tasks.length){area.append(el('div','本地暂无提交任务。服务器已有内容会在回放计划中拦下。','empty'));return;}
@@ -1534,7 +1806,7 @@
     function rememberSize(){if(!layout.collapsed&&host.style.display!=='none'&&host.offsetWidth>=280&&host.offsetHeight>=56){layout.width=host.offsetWidth;layout.height=host.offsetHeight;}saveLayout();}
     window.addEventListener('pointerup',rememberSize);window.addEventListener('pagehide',rememberSize);
     window.addEventListener('resize',applyLayout);applyLayout();render();renderBusy();
-    setInterval(()=>{if(settings.autoScan&&!active&&!editLayer?.isConnected&&!timingLayer?.isConnected&&!reviewLayer?.isConnected&&location.hash.startsWith('#/my-room/live-record'))run(scan,'自动只读扫描。');},300000);
+    setInterval(()=>{if(settings.autoScan&&!active&&!editLayer?.isConnected&&!collectionLayer?.isConnected&&!timingLayer?.isConnected&&!reviewLayer?.isConnected&&location.hash.startsWith('#/my-room/live-record'))run(scan,'自动只读扫描。');},300000);
   }
   let inlineBar,inlineRoot,fallback,inlineTimer,observer,resourceObserver,pageScanTimer,lastPageAttempt='',booted=false,lastMessage='',floating=false;
   const cardBindings=new WeakMap();
@@ -1568,11 +1840,11 @@
     return {mode,page,pageSize,cards,key};
   }
   function queuePageScan(context){
-    if(!booted||!context||context.key===lastPageAttempt||active||reviewLayer?.isConnected||editLayer?.isConnected||timingLayer?.isConnected)return;
+    if(!booted||!context||context.key===lastPageAttempt||active||reviewLayer?.isConnected||editLayer?.isConnected||collectionLayer?.isConnected||timingLayer?.isConnected)return;
     invalid=true;
     clearTimeout(pageScanTimer);pageScanTimer=setTimeout(()=>{
       pageScanTimer=null;const latest=currentScanContext();
-      if(latest?.key!==context.key||active||reviewLayer?.isConnected||editLayer?.isConnected||timingLayer?.isConnected)return;
+      if(latest?.key!==context.key||active||reviewLayer?.isConnected||editLayer?.isConnected||collectionLayer?.isConnected||timingLayer?.isConnected)return;
       run(()=>scan(),'切换分页，扫描当前页。');
     },180);
   }
@@ -1606,7 +1878,7 @@
   function paintInline(){
     if(!host)return;
     const context=currentScanContext();
-    if(!active&&!reviewLayer?.isConnected&&!editLayer?.isConnected&&!timingLayer?.isConnected&&(!context||context.key!==lastPageAttempt))invalid=true;
+    if(!active&&!reviewLayer?.isConnected&&!editLayer?.isConnected&&!collectionLayer?.isConnected&&!timingLayer?.isConnected&&(!context||context.key!==lastPageAttempt))invalid=true;
     queuePageScan(context);
     const list=inRoute()?[...document.querySelectorAll('.replay-list')].find(n=>n.getClientRects().length):null,mode=list?currentListMode(list):'unknown';
     if(!list||!['replays','published'].includes(mode)){
@@ -1649,6 +1921,7 @@
       button('选择本页可投稿',()=>{if(currentListMode(list)!=='replays')return;for(const card of cards){const s=plan&&matchSession(plan.sessions,card.querySelector('.info .title')?.getAttribute('title')||card.querySelector('.info .title')?.textContent||'',card.querySelector('.info .date')?.textContent.trim());if(s)for(const c of plan.clips.filter(c=>c.liveKey===s.liveKey&&!c.blocked))chosen.add(c.key);}render();},bar).disabled=active||invalid||!plan;
       button('清空选择',()=>{chosen.clear();render();},bar).disabled=active||!chosen.size;
     }else {bar.append(el('span','历史投稿'));button('批量编辑稿件…',()=>openManuscriptEditor(plan?.published||[]),bar).disabled=active||invalid||!plan?.published?.length;}
+    button('投稿合集管理…',openCollectionManager,bar).disabled=active;
     button(active?'正在核对…':'刷新当前页',()=>run(()=>scan(true),'强制刷新当前页。'),bar).disabled=active;button('详细面板',openDetails,bar);if(batchActive)button('停止队列',()=>engine.stop(),bar);
     const freshness=plan?`当前页扫描 ${stamp(plan.created)} · 投稿检查 ${stamp(plan.publicationCheckedAt||plan.created)}${invalid?' · 正在核对 / 暂不可提交':''}`:'等待当前页列表加载';
     const counts=mode==='replays'?`本页匹配 ${matched}/${cards.length} 场`:`已识别 ${matched}/${cards.length} 条 · 已关联 ${origins}/${cards.length} 条来源`;
@@ -1677,8 +1950,8 @@
       mount();host.style.display=floating?'block':'none';
       if(!observer)setupInline();
       if(!booted){booted=true;run(initialize,'自动载入缓存并后台核对。');}
-      else if(currentScanContext()&&!active&&!editLayer?.isConnected&&!timingLayer?.isConnected&&!reviewLayer?.isConnected&&(!plan||env.now()-plan.created>300))run(()=>scan(),'返回页面，后台核对。');
-    }else{if(host)host.style.display='none';cancelTiming?.();cancelReview?.();if(editLayer?.isConnected)manuscriptEditor.stop();}
+      else if(currentScanContext()&&!active&&!editLayer?.isConnected&&!collectionLayer?.isConnected&&!timingLayer?.isConnected&&!reviewLayer?.isConnected&&(!plan||env.now()-plan.created>300))run(()=>scan(),'返回页面，后台核对。');
+    }else{if(host)host.style.display='none';cancelTiming?.();cancelReview?.();if(editLayer?.isConnected)manuscriptEditor.stop();if(collectionLayer?.isConnected){collectionManager.stop();cancelCollection?.();}}
     queueInline();
   }
   window.addEventListener('hashchange',route);route();

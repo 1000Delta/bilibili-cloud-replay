@@ -16,3 +16,8 @@
 !tests/ui/results.json
 
 !tests/timing.test.cjs
+
+!tests/collections.test.cjs
+!tests/collection-matching.test.cjs
+!tests/ui/collections-dom.cjs
+!tests/ui/collections-dom-results.json

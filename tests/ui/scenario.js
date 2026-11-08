@@ -137,5 +137,38 @@
     check(pageCalls.filter(c=>c.route==='replays').length===1&&pageCalls.filter(c=>c.route==='streams').length===12,'twelve-card regression fetches one replay page and twelve details');
     official.remove();booted=false;clearTimeout(pageScanTimer);location.hash='';
 
+    // Collection manager: real DOM, isolated synthetic transport, never a real Bilibili call.
+    location.hash='#/my-room/live-record';window.testLedger={version:1,tasks:{}};
+    const collectionRemotes={},seasons=new Map(),collectionPosts=[];
+    for(const [aid,topic]of [[101,'星露谷物语'],[102,'星露谷物语'],[103,'空洞骑士']])collectionRemotes[aid]={archive:{aid,mid:123,title:topic+' 2026-11-08 01',tag:'游戏',desc:'合成简介',cover:'https://i0.hdslb.com/bfs/archive/mock.jpg',tid:1,copyright:1,state:0,season_id:0},videos:[{filename:'mock-'+aid,title:topic,cid:aid+1000}]};
+    const makeSeason=(id,title)=>({season:{id,mid:123,title,desc:'',cover:'https://i0.hdslb.com/bfs/archive/mock.jpg'},sections:{sections:[{id:id+1000,seasonId:id,title:'正片',epCount:0}]},episodes:[]});seasons.set(50,makeSeason(50,'空洞骑士'));
+    env.request=async(url,p,method)=>{let data;const route=Object.keys(ROUTES).find(key=>ROUTES[key]===url);if(method==='POST')collectionPosts.push({route,p:structuredClone(p)});
+      if(route==='nav')data={isLogin:true,mid:123};
+      else if(route==='collections')data={seasons:[...seasons.values()],total:seasons.size};
+      else if(route==='collectionDetail')data=structuredClone(seasons.get(Number(p.id)));
+      else if(route==='collectionSection'){const s=[...seasons.values()].find(s=>s.sections.sections.some(c=>c.id===Number(p.id)));data={section:structuredClone(s.sections.sections[0]),episodes:structuredClone(s.episodes)};}
+      else if(route==='published')data={list:Object.values(collectionRemotes).map(d=>({slice_id:d.archive.aid+10000,avid:d.archive.aid,av_title:d.archive.title,av_status:2})),total:3};
+      else if(route==='manuscript')data=structuredClone(collectionRemotes[p.aid]);
+      else if(route==='createCollection'){data=51;seasons.set(data,makeSeason(data,p.title));}
+      else if(route==='addCollectionEpisodes'){check(typeof p.sectionId==='number'&&p.episodes.every(e=>typeof e.aid==='number'&&typeof e.cid==='number'),'collection JSON identifiers are numeric');const s=[...seasons.values()].find(s=>s.sections.sections[0].id===p.sectionId);for(const e of p.episodes){s.episodes.push({...e,id:e.aid+2000,seasonId:s.season.id,sectionId:p.sectionId});collectionRemotes[e.aid].archive.season_id=s.season.id;}s.sections.sections[0].epCount=s.episodes.length;data={};}
+      else throw new Error('Unexpected collection fixture route '+route);return {http:200,json:{code:0,data}};
+    };
+    openCollectionManager();const cu=()=>collectionLayer.shadowRoot,cb=text=>[...cu().querySelectorAll('button')].find(b=>b.textContent===text);
+    check(cb('确认创建并导入 / 追加').disabled,'collection mutation disabled during initial read');await wait();
+    check(collectionPosts.length===0&&cu().querySelectorAll('.collection-group').length===2,'collection read suggests existing and new groups without writes');
+    check([...cu().querySelectorAll('legend input')].every(n=>!n.checked),'collection groups start unchecked');
+    const chooseGroup=topic=>{const box=[...cu().querySelectorAll('.collection-group')].find(n=>n.textContent.includes(topic));const input=box.querySelector('legend input');input.checked=true;input.dispatchEvent(new Event('change'));return box;};
+    let farm=chooseGroup('星露谷物语');check(!farm.querySelector('.group-videos input').disabled,'checking a group enables individual video choices');
+    cb('生成合集变更预览').click();await wait();check(collectionPosts.length===0&&!cb('确认创建并导入 / 追加').disabled&&cu().querySelector('.preview').textContent.includes('创建免费合集'),'collection preview is read-only and shows creation');
+    const titleInput=farm.querySelector('input:not([type=checkbox])');titleInput.value='星露谷物语实况';titleInput.dispatchEvent(new Event('input'));check(cb('确认创建并导入 / 追加').disabled,'collection name changes invalidate preview');
+    cb('生成合集变更预览').click();await wait();cb('确认创建并导入 / 追加').click();await wait();
+    check(collectionPosts.filter(x=>x.route==='createCollection').length===1&&collectionPosts.filter(x=>x.route==='addCollectionEpisodes').length===2,'one confirmation creates collection and imports both selected videos');
+    check(cu().textContent.includes('已回读确认'),'collection per-video verified statuses are visible');cb('确认创建并导入 / 追加').click();await wait();check(collectionPosts.length===3,'repeated collection confirmation does not create or import twice');
+    cb('重新读取投稿与合集').click();await wait();check(cu().querySelectorAll('.collection-group').length===1&&cu().textContent.includes('2 份已在合集'),'collection refresh excludes all existing members');
+    chooseGroup('空洞骑士');cb('生成合集变更预览').click();await wait();check(cu().querySelector('.preview').textContent.includes('追加到已有合集'),'existing collection preview names exact target');cb('确认创建并导入 / 追加').click();await wait();check(collectionPosts.length===4&&seasons.get(50).episodes.length===1,'existing collection appends new video without another create');
+    cb('关闭').click();check(!collectionLayer,'collection dialog closes cleanly');openCollectionManager();await wait();check(cu().querySelectorAll('.collection-group').length===0&&collectionPosts.length===4,'reopening after success is read-only with no stale actionable groups');
+    cu().querySelector('dialog').dispatchEvent(new Event('cancel',{cancelable:true}));check(!collectionLayer,'Escape dismissal cleans up collection dialog');
+    location.hash='';
+
     const report=document.createElement('pre');report.id='ui-test-result';report.textContent=JSON.stringify({passed:true,checks:results},null,2);document.body.append(report);
   })().catch(error=>{const report=document.createElement('pre');report.id='ui-test-result';report.textContent=JSON.stringify({passed:false,error:error.stack});document.body.append(report);});
