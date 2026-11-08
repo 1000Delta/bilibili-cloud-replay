@@ -5,7 +5,7 @@ function fixture(options={}){
  let uid=123,store={version:1,tasks:{}},writes=0;
  const calls=[],seasons=new Map(),sections=new Map();
  const remote=Object.fromEntries([1,2,3].map(aid=>[aid,{archive:{aid,mid:123,title:'原神 '+aid,tag:'游戏',desc:'合成简介',tid:1,copyright:1,cover:'//i0.hdslb.com/bfs/archive/synthetic.jpg',state:0,interactive:0,season_id:0},videos:[{cid:aid+100,filename:'synthetic-'+aid,title:'分P标题',desc:''}]}]));
- const publications=[1,2,3].map(aid=>({slice_id:aid+1000,avid:aid,av_title:remote[aid].archive.title,av_status:2}));
+ const publications=[1,2,3].map(aid=>({slice_id:aid+1000,avid:aid,av_title:remote[aid].archive.title,av_cover:remote[aid].archive.cover,av_status:2}));
  const addSeason=(id=10,title='已有合集',sectionIds=[100])=>{
   const d={season:{id,mid:123,title,desc:'',cover:remote[1].archive.cover},sections:{sections:sectionIds.map(sid=>({id:sid,seasonId:id,title:'默认章节',epCount:0}))}};
   seasons.set(String(id),d);for(const sid of sectionIds)sections.set(String(sid),{section:{id:sid,seasonId:id,epCount:0},episodes:[]});return d;
@@ -24,6 +24,7 @@ function fixture(options={}){
   else if(route==='collectionSection')data=clone(sections.get(String(p.id)));
   else if(route==='published')data={total:publications.length,list:clone(publications.slice((p.page-1)*p.page_size,p.page*p.page_size))};
   else if(route==='manuscript')data=clone(remote[String(p.aid)]);
+  else if(route==='collectionVideoParts'){const d=remote[String(p.aid)];data={archive:{aid:d.archive.aid,title:d.archive.title},videos:d.videos.map(v=>({cid:v.cid,index:1,title:v.title}))};}
   else if(route==='createCollection'){
    if(options.rejectCreate)return {http:200,json:{code:-400,message:'rejected'}};
    if(!options.noCreateApply)addSeason(20,p.title,[200]);
@@ -38,7 +39,8 @@ function fixture(options={}){
  const engine=new C.Engine(env);let manager=new C.CollectionManager(engine);
  return {env,engine,options,calls,remote,seasons,sections,publications,addSeason,addMember,get manager(){return manager;},reload(){manager=new C.CollectionManager(new C.Engine(env));return manager;},setUID(value){uid=value;},store:()=>clone(store),writes:()=>writes,posts:()=>calls.filter(c=>c.method==='POST')};
 }
-async function preview(f,choices=[{title:'新合集',description:'合成简介',aids:['1']}]){return f.manager.preview(await f.manager.prepare(),choices);}
+// Historical strict-check scenarios explicitly opt in; the UI/API default is tested below.
+async function preview(f,choices=[{title:'新合集',description:'合成简介',aids:['1']}],options={checkVideos:true}){return f.manager.preview(await f.manager.prepare(),choices,options);}
 async function existing(f,aids=['1']){f.addSeason();return preview(f,[{seasonId:'10',sectionId:'100',aids}]);}
 test('collection parsers require ownership, matching IDs, complete membership and unique sections',()=>{
  const f=fixture(),d=f.addSeason();assert.equal(C.collectionDetail(d,'123','10').id,'10');
@@ -218,7 +220,7 @@ test('34-video local previews and repeated clicks issue zero requests, sleeps or
  const before=f.calls.length;f.options.onRequest=()=>{throw new Error('Preview must not access the network');};f.options.onSleep=()=>{throw new Error('Preview must not schedule network work');};
  const choices=[{title:'影之刃零',description:'本地方案',aids:session.videos.map(v=>v.aid)}];
  const previews=await Promise.all(Array.from({length:5},()=>f.manager.preview(session,choices)));
- for(const p of previews){assert.equal(p.items[0].videos.length,34);assert.deepEqual(p.items[0].videos[0],{aid:'1',title:'影之刃零 1'});}
+ for(const p of previews){assert.equal(p.items[0].videos.length,34);assert.deepEqual(p.items[0].videos[0],{aid:'1',title:'影之刃零 1',cover:''});}
  assert.equal(new Set(previews.map(p=>p.token)).size,5);assert.equal(f.calls.length,before);assert.equal(f.posts().length,0);assert.equal(f.writes(),0);
 });
 test('editing local selections and descriptions does not require another account or manuscript read',async()=>{
@@ -275,4 +277,77 @@ test('new collection membership is checked after the paced video batch',async()=
  f.options.onRequest=(route,params)=>{if(route==='manuscript'&&params.aid==='2'){f.addSeason(30,'并发合集',[300]);f.addMember(300,1);}};
  const result=await f.manager.execute(p.token,{confirmed:true});assert.equal(f.posts().length,0);assert(result.some(r=>r.message?.includes('稿件已加入合集')));
  const checks=f.calls.map(c=>c.route);assert(checks.lastIndexOf('collectionSection')>checks.lastIndexOf('manuscript'));
+});
+
+async function directPlan(f,target='new',aids=['1'],options){
+ if(target==='existing'&&!f.seasons.has('10'))f.addSeason();
+ return f.manager.preview(await f.manager.prepare(),target==='new'?[{title:'直接合集',description:'直接创建测试',aids}]:[{seasonId:10,sectionId:100,aids}],options);
+}
+test('default mode skips every view, creates from list cover before CID reads and tolerates stale list titles',async()=>{
+ const f=fixture(),p=await directPlan(f,'new',['1','2']);assert.equal(p.checkVideos,false);assert.equal(p.items[0].videos[0].cover,f.publications[0].av_cover);
+ f.remote[1].archive.title='创作中心更新后的标题';f.remote[1].archive.state=-1;f.remote[1].archive.interactive=1;
+ f.options.onRequest=route=>{if(route==='manuscript')throw new Error('view is disabled');};
+ const r=await f.manager.execute(p.token,{confirmed:true});assert.equal(r.at(-1).state,'verified');
+ assert.equal(f.calls.filter(c=>c.route==='manuscript').length,0);assert.equal(f.calls.filter(c=>c.route==='collectionVideoParts').length,2);
+ assert(f.calls.findIndex(c=>c.route==='createCollection')<f.calls.findIndex(c=>c.route==='collectionVideoParts'));
+ assert.equal(f.posts()[0].p.cover,'https://i0.hdslb.com/bfs/archive/synthetic.jpg');assert.equal(f.posts()[1].p.episodes[0].title,'原神 1');
+ assert.equal(f.remote[1].archive.title,'创作中心更新后的标题');assert.equal(f.store().collectionJobs.imports['1'].cid,'101');
+});
+test('optional mode is frozen in the plan and keeps strict title checks with an actionable error',async()=>{
+ for(const checked of [false,true]){
+  const f=fixture(),options={checkVideos:checked},p=await directPlan(f,'existing',['1'],options);options.checkVideos=!checked;p.checkVideos=!checked;
+  f.remote[1].archive.title='修改后的标题';const r=await f.manager.execute(p.token,{confirmed:true});
+  assert.equal(f.posts().length,checked?0:1);assert.equal(f.calls.filter(c=>c.route==='manuscript').length,checked?1:0);
+  if(checked)assert(r.some(j=>j.message?.includes('av1：view 当前标题与回放投稿列表标题不同')));
+ }
+});
+test('missing or invalid list cover stops default creation without secretly enabling view',async()=>{
+ for(const cover of [undefined,'','https://example.com/cover.jpg','not a URL']){
+  const f=fixture();f.publications[0].av_cover=cover;const p=await directPlan(f);const r=await f.manager.execute(p.token,{confirmed:true});
+  assert.equal(f.posts().length,0);assert.equal(f.calls.filter(c=>['manuscript','collectionVideoParts'].includes(c.route)).length,0);assert(r.some(j=>j.message?.includes('首条稿件未提供有效B站封面')));
+ }
+ const f=fixture();delete f.publications[0].av_cover;const p=await directPlan(f,'existing');await f.manager.execute(p.token,{confirmed:true});assert.equal(f.posts().length,1);
+});
+test('enabling checks can resolve a missing list cover without changing default behavior',async()=>{
+ const f=fixture();delete f.publications[0].av_cover;const p=await directPlan(f,'new',['1'],{checkVideos:true});await f.manager.execute(p.token,{confirmed:true});assert.equal(f.posts().length,2);assert.equal(f.calls.filter(c=>c.route==='collectionVideoParts').length,0);
+});
+test('default CID resolution rejects mismatched identity, missing or unsafe CID and multipart',async()=>{
+ for(const change of [d=>d.archive.aid=99,d=>d.videos=[],d=>d.videos.push(clone(d.videos[0])),d=>delete d.videos[0].cid,d=>d.videos[0].cid='9007199254740992',d=>d.videos[0].cid=0]){
+  const f=fixture(),p=await directPlan(f,'existing');change(f.remote[1]);const r=await f.manager.execute(p.token,{confirmed:true});assert.equal(f.posts().length,0);assert.equal(r.at(-1).state,'failed');assert.equal(f.calls.filter(c=>c.route==='manuscript').length,0);
+ }
+});
+test('default creation survives a later CID failure and resumes without recreating',async()=>{
+ const f=fixture(),p=await directPlan(f);f.options.onRequest=route=>route==='collectionVideoParts'?{http:200,json:{code:-400,message:'暂时没有CID'}}:undefined;
+ const first=await f.manager.execute(p.token,{confirmed:true});assert.equal(f.posts().length,1);assert.equal(first.at(-1).state,'failed');assert.equal(f.store().collectionJobs.creations['new:直接合集'].seasonId,'20');
+ f.options.onRequest=undefined;await f.manager.execute(p.token,{confirmed:true});assert.deepEqual(f.posts().map(c=>c.route),['createCollection','addCollectionEpisodes']);
+});
+test('both modes keep account changes, complete membership and unknown-write protections',async()=>{
+ for(const checkVideos of [false,true]){
+  const f=fixture(),p=await directPlan(f,'existing',['1'],{checkVideos});f.addMember(100,1);await f.manager.execute(p.token,{confirmed:true});assert.equal(f.posts().length,0);
+  const g=fixture(),q=await directPlan(g,'existing',['1'],{checkVideos});g.addSeason(30,'其他合集',[300]);g.addMember(300,1);await g.manager.execute(q.token,{confirmed:true});assert.equal(g.posts().length,0);
+  const h=fixture(),r=await directPlan(h,'existing',['1'],{checkVideos});h.options.onRequest=route=>{if(route===(checkVideos?'manuscript':'collectionVideoParts'))h.setUID(999);};await h.manager.execute(r.token,{confirmed:true});assert.equal(h.posts().length,0);
+ }
+});
+test('default unknown import and mode changes never resend or retarget',async()=>{
+ const f=fixture({noAddApply:true,addTimeout:true}),p=await directPlan(f,'existing');await f.manager.execute(p.token,{confirmed:true});assert.equal(f.posts().length,1);assert.equal(f.store().collectionJobs.imports['1'].state,'unknown');
+ f.reload();const q=await directPlan(f,'new',['1'],{checkVideos:true});await f.manager.execute(q.token,{confirmed:true});assert.equal(f.posts().length,1);assert.equal(f.store().collectionJobs.imports['1'].seasonId,'10');
+ f.addMember(100,1);await f.manager.checkPending();assert.equal(f.store().collectionJobs.imports['1'].state,'verified');
+});
+test('unknown default creation cannot be retried after switching checks and renaming',async()=>{
+ const f=fixture({createTimeout:true,noCreateApply:true}),p=await directPlan(f);await f.manager.execute(p.token,{confirmed:true});assert.equal(f.posts().length,1);f.reload();
+ const q=await preview(f,[{title:'改名合集',aids:['1']}],{checkVideos:true});await f.manager.execute(q.token,{confirmed:true});assert.equal(f.posts().length,1);
+});
+test('default rejected import refreshes CID and refuses changed parts instead of guessing',async()=>{
+ const f=fixture({rejectAdd:true}),p=await directPlan(f,'existing');await f.manager.execute(p.token,{confirmed:true});assert.equal(f.posts().length,1);
+ f.options.rejectAdd=false;f.remote[1].videos[0].cid=999;const r=await f.manager.execute(p.token,{confirmed:true});assert.equal(f.posts().length,1);assert(r.some(j=>j.message?.includes('视频CID已变化')));
+});
+test('default CID reads respect throttling and -702 stops later imports without retry',async()=>{
+ let now=0;const reads=[];const f=fixture({onSleep:ms=>now+=ms,onRequest:route=>{if(route==='collectionVideoParts')reads.push(now);}});f.env.interval=()=>2500;
+ const p=await directPlan(f,'existing',['1','2','3']);await f.manager.execute(p.token,{confirmed:true});assert.equal(reads.length,3);for(let i=1;i<reads.length;i++)assert(reads[i]-reads[i-1]>=2500);
+ const g=fixture(),q=await directPlan(g,'existing',['1','2']);g.options.onRequest=route=>route==='collectionVideoParts'?{http:200,json:{code:-702,message:'请求频繁'}}:undefined;
+ const r=await g.manager.execute(q.token,{confirmed:true});assert.equal(g.calls.filter(c=>c.route==='collectionVideoParts').length,1);assert.equal(g.posts().length,0);assert(r.some(j=>j.state==='cancelled'));
+});
+test('default cancellation, persistence failure and replay preserve no-double-write behavior',async()=>{
+ for(const failure of ['stop','journal']){const f=fixture(),p=await directPlan(f,'existing');if(failure==='stop')f.options.onSleep=()=>f.manager.stop();else f.options.failWrite=true;await f.manager.execute(p.token,{confirmed:true});assert.equal(f.posts().length,0);}
+ const f=fixture(),p=await directPlan(f);await f.manager.execute(p.token,{confirmed:true});await f.manager.execute(p.token,{confirmed:true});assert.equal(f.posts().length,2);
 });
