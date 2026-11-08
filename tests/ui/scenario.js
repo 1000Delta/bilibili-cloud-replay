@@ -139,10 +139,10 @@
 
     // Collection manager: real DOM, isolated synthetic transport, never a real Bilibili call.
     location.hash='#/my-room/live-record';window.testLedger={version:1,tasks:{}};
-    const collectionRemotes={},seasons=new Map(),collectionPosts=[];
+    const collectionRemotes={},seasons=new Map(),collectionPosts=[],collectionRequests=[];
     for(const [aid,topic]of [[101,'星露谷物语'],[102,'星露谷物语'],[103,'空洞骑士']])collectionRemotes[aid]={archive:{aid,mid:123,title:topic+' 2026-11-08 01',tag:'游戏',desc:'合成简介',cover:'https://i0.hdslb.com/bfs/archive/mock.jpg',tid:1,copyright:1,state:0,season_id:0},videos:[{filename:'mock-'+aid,title:topic,cid:aid+1000}]};
     const makeSeason=(id,title)=>({season:{id,mid:123,title,desc:'',cover:'https://i0.hdslb.com/bfs/archive/mock.jpg'},sections:{sections:[{id:id+1000,seasonId:id,title:'正片',epCount:0}]},episodes:[]});seasons.set(50,makeSeason(50,'空洞骑士'));
-    env.request=async(url,p,method)=>{let data;const route=Object.keys(ROUTES).find(key=>ROUTES[key]===url);if(method==='POST')collectionPosts.push({route,p:structuredClone(p)});
+    env.request=async(url,p,method)=>{let data;const route=Object.keys(ROUTES).find(key=>ROUTES[key]===url);collectionRequests.push(route);if(method==='POST')collectionPosts.push({route,p:structuredClone(p)});
       if(route==='nav')data={isLogin:true,mid:123};
       else if(route==='collections')data={seasons:[...seasons.values()],total:seasons.size};
       else if(route==='collectionDetail')data=structuredClone(seasons.get(Number(p.id)));
@@ -179,10 +179,14 @@
     farmToggle.click();check(!secondVideo.checked&&farmDescription.value==='保留的合成简介'&&farm.querySelector('legend input').checked,'expand and collapse preserve selection and draft fields');
     farmTarget.value='50';farmTarget.dispatchEvent(new Event('change'));check(farm.querySelector('.group-summary').textContent==='追加 · 1/2 个视频','summary follows switching to an existing collection');
     farmTarget.value='';farmTarget.dispatchEvent(new Event('change'));farm.querySelector('input:not([type=checkbox])').value='星露谷物语';secondVideo.checked=true;secondVideo.dispatchEvent(new Event('change'));check(farm.querySelector('.group-summary').textContent==='新建 · 2 个视频','summary restores new-collection action and full count');
+    const readsBeforePreview=collectionRequests.length;check(!collectionRequests.includes('manuscript'),'opening collection manager does not eagerly read per-video metadata');
     cb('生成合集变更预览').click();check(farmToggle.disabled,'group toggles are disabled during async work');await wait();check(collectionPosts.length===0&&!cb('确认创建并导入 / 追加').disabled&&cu().querySelector('.preview').textContent.includes('创建免费合集'),'collection preview is read-only and shows creation');
+    check(collectionRequests.length===readsBeforePreview&&cu().textContent.includes('已在本地生成方案，未发送请求'),'collection preview performs zero API requests and explains local generation');
+    check(!cu().querySelector('.preview img')&&cu().querySelector('.preview').textContent.includes('确认时复用下方第一条稿件'),'local preview describes the cover source without loading remote images');
+    cb('生成合集变更预览').click();cb('生成合集变更预览').click();await wait();check(collectionRequests.length===readsBeforePreview,'repeated and rapid preview clicks do not refetch account or video metadata');
     farmToggle.click();farmToggle.click();farmToggle.click();check(collapsed(farm)&&!cb('确认创建并导入 / 追加').disabled&&collectionPosts.length===0,'repeated display toggles preserve a valid preview without writes');farmToggle.click();
     const titleInput=farm.querySelector('input:not([type=checkbox])');titleInput.value='星露谷物语实况';titleInput.dispatchEvent(new Event('input'));check(cb('确认创建并导入 / 追加').disabled,'collection name changes invalidate preview');
-    cb('生成合集变更预览').click();await wait();cb('确认创建并导入 / 追加').click();await wait();
+    cb('生成合集变更预览').click();await wait();check(collectionRequests.length===readsBeforePreview,'regenerating an edited collection draft stays offline');cb('确认创建并导入 / 追加').click();await wait();
     check(collectionPosts.filter(x=>x.route==='createCollection').length===1&&collectionPosts.filter(x=>x.route==='addCollectionEpisodes').length===2,'one confirmation creates collection and imports both selected videos');
     check(cu().textContent.includes('已回读确认'),'collection per-video verified statuses are visible');cb('确认创建并导入 / 追加').click();await wait();check(collectionPosts.length===3,'repeated collection confirmation does not create or import twice');
     cb('重新读取投稿与合集').click();await wait();check(cu().querySelectorAll('.collection-group').length===1&&cu().textContent.includes('2 份已在合集'),'collection refresh excludes all existing members');check(collapsed(findGroup('空洞骑士')),'refreshed collection groups start collapsed');

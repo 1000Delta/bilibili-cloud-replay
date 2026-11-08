@@ -20,12 +20,18 @@
     "expand and collapse preserve selection and draft fields",
     "summary follows switching to an existing collection",
     "summary restores new-collection action and full count",
+    "opening collection manager does not eagerly read per-video metadata",
     "group toggles are disabled during async work",
     "async UI operation finished",
     "collection preview is read-only and shows creation",
+    "collection preview performs zero API requests and explains local generation",
+    "local preview describes the cover source without loading remote images",
+    "async UI operation finished",
+    "repeated and rapid preview clicks do not refetch account or video metadata",
     "repeated display toggles preserve a valid preview without writes",
     "collection name changes invalidate preview",
     "async UI operation finished",
+    "regenerating an edited collection draft stays offline",
     "collection JSON identifiers are numeric",
     "collection JSON identifiers are numeric",
     "async UI operation finished",
@@ -45,8 +51,5 @@
     "async UI operation finished",
     "reopening after success is read-only with no stale actionable groups",
     "Escape dismissal cleans up collection dialog"
-  ],
-  "mode": "synthetic happy-dom; not a browser or layout test",
-  "source_sha256": "a8364b8ab4085f0a58984be15e65d14c16019254dd5f51d6c06fc9ffb1c52fdd",
-  "network": "disabled: scripted requests use fixtures; image, CSS, iframe and external script loading disabled"
+  ]
 }

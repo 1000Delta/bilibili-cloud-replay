@@ -89,17 +89,17 @@ test('same video in another chapter blocks import and cross-group duplicate AIDs
  const f=fixture();f.addSeason(10,'已有合集',[100,101]);const p=await preview(f,[{seasonId:10,sectionId:100,aids:['1']}]);f.addMember(101,1);await f.manager.execute(p.token,{confirmed:true});assert.equal(f.posts().length,0);
  const g=fixture();await assert.rejects(()=>preview(g,[{title:'甲合集',aids:['1']},{title:'乙合集',aids:['1']}]),/多个分组/);assert.equal(g.posts().length,0);
 });
-test('invalid owners, review states, multipart, interaction and unsafe CIDs block preview',async()=>{
+test('invalid owners, review states, multipart, interaction and unsafe CIDs block confirmation before any write',async()=>{
  for(const mutate of [d=>d.archive.mid=999,d=>d.archive.state=-1,d=>d.videos.push(clone(d.videos[0])),d=>d.archive.interactive=1,d=>d.archive.season_id=10,d=>d.videos[0].cid='9007199254740992']){
-  const f=fixture();mutate(f.remote[1]);await assert.rejects(()=>preview(f));assert.equal(f.posts().length,0);
+  for(const target of ['new','existing']){const f=fixture();mutate(f.remote[1]);const p=target==='new'?await preview(f):await existing(f);const results=await f.manager.execute(p.token,{confirmed:true});assert(results.some(r=>r.state==='failed'));assert.equal(f.posts().length,0);}
  }
 });
 test('account changes after preview or during throttle cannot write',async()=>{
  const f=fixture(),p=await existing(f);f.setUID(999);await assert.rejects(()=>f.manager.execute(p.token,{confirmed:true}),/账号/);assert.equal(f.posts().length,0);
  const g=fixture(),q=await existing(g);g.options.onSleep=()=>g.setUID(999);await g.manager.execute(q.token,{confirmed:true});assert.equal(g.posts().length,0);
 });
-test('remote title, state, part or membership changes invalidate the frozen preview',async()=>{
- for(const change of [d=>d.archive.title='变化',d=>d.archive.state=-1,d=>d.videos[0].cid=999,d=>d.archive.season_id=99]){
+test('remote title, state, multipart or membership changes block the local plan at confirmation',async()=>{
+ for(const change of [d=>d.archive.title='变化',d=>d.archive.state=-1,d=>d.videos.push(clone(d.videos[0])),d=>d.archive.season_id=99]){
   const f=fixture(),p=await existing(f);change(f.remote[1]);await f.manager.execute(p.token,{confirmed:true});assert.equal(f.posts().length,0);
  }
 });
@@ -211,4 +211,68 @@ test('replaying a successful preview does not restore a later-removed member wit
   const replayed=await f.manager.execute(p.token,{confirmed:true});assert.equal(replayed.at(-1).state,outcome);assert.equal(f.posts().length,sent);assert.equal(section.episodes.length,0);
   const fresh=await preview(f,[{seasonId:10,sectionId:100,aids:['1']}]);await f.manager.execute(fresh.token,{confirmed:true});assert.equal(f.posts().length,sent+1);assert.equal(section.episodes.length,1);
  }
+});
+test('34-video local previews and repeated clicks issue zero requests, sleeps or writes',async()=>{
+ const f=fixture();f.publications.splice(0,f.publications.length,...Array.from({length:34},(_,i)=>({slice_id:i+1000,avid:i+1,av_title:'影之刃零 '+(i+1),av_status:2})));
+ const session=await f.manager.prepare();assert.equal(f.calls.filter(c=>c.route==='manuscript').length,0);
+ const before=f.calls.length;f.options.onRequest=()=>{throw new Error('Preview must not access the network');};f.options.onSleep=()=>{throw new Error('Preview must not schedule network work');};
+ const choices=[{title:'影之刃零',description:'本地方案',aids:session.videos.map(v=>v.aid)}];
+ const previews=await Promise.all(Array.from({length:5},()=>f.manager.preview(session,choices)));
+ for(const p of previews){assert.equal(p.items[0].videos.length,34);assert.deepEqual(p.items[0].videos[0],{aid:'1',title:'影之刃零 1'});}
+ assert.equal(new Set(previews.map(p=>p.token)).size,5);assert.equal(f.calls.length,before);assert.equal(f.posts().length,0);assert.equal(f.writes(),0);
+});
+test('editing local selections and descriptions does not require another account or manuscript read',async()=>{
+ const f=fixture(),session=await f.manager.prepare(),before=f.calls.length;
+ const first=await f.manager.preview(session,[{title:'第一方案',description:'原简介',aids:['1','2']}]);
+ const second=await f.manager.preview(session,[{title:'第二方案',description:'改后简介',aids:['2']}]);
+ assert.equal(first.items[0].videos.length,2);assert.equal(second.items[0].videos.length,1);assert.equal(second.items[0].description,'改后简介');assert.equal(f.calls.length,before);
+ for(const title of ['','坏\n名称'])await assert.rejects(()=>f.manager.preview(session,[{title,aids:['1']}]),/名称/);
+ assert.equal(f.calls.length,before);
+});
+test('an account switch still allows local preview but prevents confirmation writes',async()=>{
+ const f=fixture(),session=await f.manager.prepare(),before=f.calls.length;f.setUID(999);
+ const p=await f.manager.preview(session,[{title:'本地合集',aids:['1']}]);assert.equal(f.calls.length,before);
+ await assert.rejects(()=>f.manager.execute(p.token,{confirmed:true}),/账号/);assert.equal(f.posts().length,0);
+});
+test('confirmation resolves current CID and cover absent from the publication list',async()=>{
+ for(const target of ['new','existing']){
+  const f=fixture(),p=target==='new'?await preview(f):await existing(f);f.remote[1].videos[0].cid=789;f.remote[1].archive.cover='https://i0.hdslb.com/bfs/archive/current.jpg';
+  await f.manager.execute(p.token,{confirmed:true});const add=f.posts().find(c=>c.route==='addCollectionEpisodes');assert.equal(add.p.episodes[0].cid,789);
+  if(target==='new')assert.equal(f.posts()[0].p.cover,f.remote[1].archive.cover);
+ }
+});
+test('validated CID and cover stay frozen between creation and import or a rejected import retry',async()=>{
+ for(const field of ['cid','cover'])for(const target of ['new','existing']){
+  const f=fixture(target==='existing'?{rejectAdd:true}:{}),p=target==='new'?await preview(f):await existing(f);
+  const change=()=>{if(field==='cid')f.remote[1].videos[0].cid=999;else f.remote[1].archive.cover='https://i0.hdslb.com/bfs/archive/changed.jpg';};
+  if(target==='new')f.options.onRequest=route=>{if(route==='createCollection')change();};
+  await f.manager.execute(p.token,{confirmed:true});
+  if(target==='existing'){change();f.options.rejectAdd=false;await f.manager.execute(p.token,{confirmed:true});}
+  assert.equal(f.posts().length,1);assert.equal(f.posts()[0].route,target==='new'?'createCollection':'addCollectionEpisodes');
+ }
+});
+test('manuscript validation is serial and respects the one-second floor and larger configured intervals',async()=>{
+ for(const interval of [0,2500]){
+  let now=0;const reads=[];const f=fixture({onSleep:ms=>{now+=ms;},onRequest:route=>{if(route==='manuscript')reads.push(now);}});f.env.interval=()=>interval;
+  const p=await preview(f,[{title:'批量合集',aids:['1','2','3']}]);assert.equal(reads.length,0);await f.manager.execute(p.token,{confirmed:true});
+  assert.equal(reads.length,6);for(let i=1;i<reads.length;i++)assert(reads[i]-reads[i-1]>=Math.max(1000,interval));assert.equal(f.posts().length,4);
+ }
+});
+test('rate limit -702 stops the remaining confirmed batch without retrying the refused read',async()=>{
+ for(const target of ['new','existing']){
+  const f=fixture();if(target==='existing')f.addSeason();
+  const p=await preview(f,target==='new'?[{title:'第一合集',aids:['1']},{title:'第二合集',aids:['2']}]:[{seasonId:10,sectionId:100,aids:['1','2']}]);
+  f.options.onRequest=route=>route==='manuscript'?{http:200,json:{code:-702,message:'请求频率过高，请稍后再试'}}:undefined;
+  const results=await f.manager.execute(p.token,{confirmed:true});assert.equal(f.calls.filter(c=>c.route==='manuscript').length,1);assert.equal(f.posts().length,0);assert(results.some(r=>r.state==='cancelled'));assert(results.some(r=>r.message?.includes('已停止后续请求')));
+ }
+});
+test('cancel during the first paced manuscript read prevents that read and every write',async()=>{
+ const f=fixture(),p=await preview(f,[{title:'批量合集',aids:['1','2','3']}]);let sleeps=0;f.options.onSleep=()=>{if(++sleeps===2)f.manager.stop();};
+ await f.manager.execute(p.token,{confirmed:true});assert.equal(f.calls.filter(c=>c.route==='manuscript').length,0);assert.equal(f.posts().length,0);
+});
+test('new collection membership is checked after the paced video batch',async()=>{
+ const f=fixture(),p=await preview(f,[{title:'批量合集',aids:['1','2']}]);
+ f.options.onRequest=(route,params)=>{if(route==='manuscript'&&params.aid==='2'){f.addSeason(30,'并发合集',[300]);f.addMember(300,1);}};
+ const result=await f.manager.execute(p.token,{confirmed:true});assert.equal(f.posts().length,0);assert(result.some(r=>r.message?.includes('稿件已加入合集')));
+ const checks=f.calls.map(c=>c.route);assert(checks.lastIndexOf('collectionSection')>checks.lastIndexOf('manuscript'));
 });
