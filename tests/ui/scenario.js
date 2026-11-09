@@ -139,10 +139,11 @@
 
     // Collection manager: real DOM, isolated synthetic transport, never a real Bilibili call.
     location.hash='#/my-room/live-record';window.testLedger={version:1,tasks:{}};
-    const collectionRemotes={},seasons=new Map(),collectionPosts=[],collectionRequests=[];
+    const collectionRemotes={},seasons=new Map(),collectionPosts=[],collectionRequests=[];let collectionHook=null;
     for(const [aid,topic]of [[101,'星露谷物语'],[102,'星露谷物语'],[103,'空洞骑士']])collectionRemotes[aid]={archive:{aid,mid:123,title:topic+' 2026-11-08 01',tag:'游戏',desc:'合成简介',cover:'https://i0.hdslb.com/bfs/archive/mock.jpg',tid:1,copyright:1,state:0,season_id:0},videos:[{filename:'mock-'+aid,title:topic,cid:aid+1000}]};
     const makeSeason=(id,title)=>({season:{id,mid:123,title,desc:'',cover:'https://i0.hdslb.com/bfs/archive/mock.jpg'},sections:{sections:[{id:id+1000,seasonId:id,title:'正片',epCount:0}]},episodes:[]});seasons.set(50,makeSeason(50,'空洞骑士'));
     env.request=async(url,p,method)=>{let data;const route=Object.keys(ROUTES).find(key=>ROUTES[key]===url);collectionRequests.push(route);if(method==='POST')collectionPosts.push({route,p:structuredClone(p)});
+      const overridden=await collectionHook?.(route,p,method);if(overridden!==undefined)return overridden;
       if(route==='nav')data={isLogin:true,mid:123};
       else if(route==='collections')data={seasons:[...seasons.values()],total:seasons.size};
       else if(route==='collectionDetail')data=structuredClone(seasons.get(Number(p.id)));
@@ -184,11 +185,28 @@
     const readsBeforePreview=collectionRequests.length;check(!collectionRequests.includes('manuscript'),'opening collection manager does not eagerly read per-video metadata');
     cb('生成合集变更预览').click();check(farmToggle.disabled,'group toggles are disabled during async work');await wait();check(collectionPosts.length===0&&!cb('确认创建并导入 / 追加').disabled&&cu().querySelector('.preview').textContent.includes('创建免费合集'),'collection preview is read-only and shows creation');
     check(collectionRequests.length===readsBeforePreview&&cu().textContent.includes('已在本地生成方案，未发送请求'),'collection preview performs zero API requests and explains local generation');
+    check(cu().querySelectorAll('dialog').length===2&&cu().querySelector('.collection-review').open&&!cu().querySelector('dialog').contains(cu().querySelector('.collection-review')),'review opens in a separate modal instead of appending to the draft');
+    check(cu().querySelectorAll('.review-video[data-state=pending]').length===2&&cu().querySelector('.review-summary').textContent.includes('待处理 2'),'every selected video has a pending row before submission');
+    check(cu().querySelector('.collection-review').getAttribute('aria-labelledby')&&cu().querySelector('.review-summary').getAttribute('role')==='status'&&cu().querySelector('.job-badge span').getAttribute('aria-hidden')==='true','review has accessible name, live summary and text accompanying icons');
+    const reviewDialog=()=>cu().querySelector('.collection-review'),reviewButton=text=>[...reviewDialog().querySelectorAll('button')].find(b=>b.textContent===text);
+    reviewDialog().dispatchEvent(new Event('cancel',{cancelable:true}));check(!reviewDialog().open&&collectionLayer&&farmDescription.value==='保留的合成简介'&&cu().activeElement===cb('生成合集变更预览'),'Escape returns to the unchanged draft and restores review-trigger focus');
+    cb('查看变更与状态').click();check(reviewDialog().open&&cu().querySelectorAll('.review-video').length===2,'reopening review keeps one row per video');
     check(!cu().querySelector('.preview img')&&cu().querySelector('.preview').textContent.includes('复用下方第一条稿件'),'local preview describes the cover source without loading remote images');
-    cb('生成合集变更预览').click();cb('生成合集变更预览').click();await wait();check(collectionRequests.length===readsBeforePreview,'repeated and rapid preview clicks do not refetch account or video metadata');
-    farmToggle.click();farmToggle.click();farmToggle.click();check(collapsed(farm)&&!cb('确认创建并导入 / 追加').disabled&&collectionPosts.length===0,'repeated display toggles preserve a valid preview without writes');farmToggle.click();
+    reviewButton('返回编辑').click();cb('生成合集变更预览').click();cb('生成合集变更预览').click();await wait();check(collectionRequests.length===readsBeforePreview,'repeated and rapid preview clicks do not refetch account or video metadata');
+    reviewButton('返回编辑').click();farmToggle.click();farmToggle.click();farmToggle.click();check(collapsed(farm)&&!cb('确认创建并导入 / 追加').disabled&&collectionPosts.length===0,'repeated display toggles preserve a valid preview without writes');farmToggle.click();
     const titleInput=farm.querySelector('input:not([type=checkbox])');titleInput.value='星露谷物语实况';titleInput.dispatchEvent(new Event('input'));check(cb('确认创建并导入 / 追加').disabled,'collection name changes invalidate preview');
-    cb('生成合集变更预览').click();await wait();check(collectionRequests.length===readsBeforePreview,'regenerating an edited collection draft stays offline');cb('确认创建并导入 / 追加').click();await wait();
+    cb('生成合集变更预览').click();await wait();check(collectionRequests.length===readsBeforePreview,'regenerating an edited collection draft stays offline');
+    let releaseFirst,releaseSecond,releaseFinal;const firstGate=new Promise(r=>releaseFirst=r),secondGate=new Promise(r=>releaseSecond=r),finalGate=new Promise(r=>releaseFinal=r);let finalWaiting=false;
+    collectionHook=async(route,p)=>{if(route==='addCollectionEpisodes')await (p.episodes[0].aid===101?firstGate:secondGate);if(route==='collectionDetail'&&collectionPosts.filter(p=>p.route==='addCollectionEpisodes').length===2){finalWaiting=true;await finalGate;}};
+    const collectionUntil=async(predicate)=>{for(let i=0;i<200&&!predicate();i++)await tick();check(predicate(),'expected asynchronous review phase reached');};
+    cb('确认创建并导入 / 追加').click();await collectionUntil(()=>collectionPosts.some(p=>p.route==='addCollectionEpisodes'));
+    check(cu().querySelector('[data-job=av101]').dataset.state==='submitting'&&cu().querySelector('[data-job=av102]').dataset.state==='pending','in-flight add shows submitting only on its own stable row');
+    const row101=cu().querySelector('[data-job=av101]');cb('确认创建并导入 / 追加').click();check(collectionPosts.filter(p=>p.route==='addCollectionEpisodes').length===1&&reviewButton('停止后续').disabled===false,'duplicate confirmation is disabled while stop remains available');
+    releaseFirst();await collectionUntil(()=>collectionPosts.filter(p=>p.route==='addCollectionEpisodes').length===2);
+    check(row101===cu().querySelector('[data-job=av101]')&&row101.dataset.state==='pending'&&row101.textContent.includes('已受理')&&cu().querySelector('[data-job=av102]').dataset.state==='submitting','accepted row stays pending verification while the next video submits');
+    releaseSecond();await collectionUntil(()=>finalWaiting);check(row101.dataset.state==='checking'&&cu().querySelectorAll('.review-video[data-state=done]').length===0,'batch verification is visible and never reports done before readback');
+    releaseFinal();await wait();collectionHook=null;
+    check(cu().querySelectorAll('.review-video[data-state=done]').length===2&&cu().querySelector('.review-summary').textContent.includes('完成 2'),'final readback updates both rows to done and refreshes summary');
     check(!collectionRequests.includes('manuscript')&&collectionRequests.filter(r=>r==='collectionVideoParts').length===2,'default confirmation skips every view and only resolves required CIDs');
     check(collectionRequests.indexOf('createCollection')<collectionRequests.indexOf('collectionVideoParts'),'default mode creates before per-video CID reads');
     check(collectionPosts.filter(x=>x.route==='createCollection').length===1&&collectionPosts.filter(x=>x.route==='addCollectionEpisodes').length===2,'one confirmation creates collection and imports both selected videos');
@@ -197,10 +215,47 @@
     check(collectionRequests.slice(lastCollectionAdd+1).filter(route=>route==='collectionSection').length===1,'one final section read verifies the complete selected batch');
     check(cu().querySelectorAll('[data-job^="av"]').length===2&&!cu().textContent.includes('已受理，批次结束后核对'),'final results replace pending rows instead of duplicating each video');
     check(cu().textContent.includes('已回读确认'),'collection per-video verified statuses are visible');cb('确认创建并导入 / 追加').click();await wait();check(collectionPosts.length===3,'repeated collection confirmation does not create or import twice');
-    cb('重新读取投稿与合集').click();await wait();check(cu().querySelectorAll('.collection-group').length===1&&cu().textContent.includes('2 份已在合集'),'collection refresh excludes all existing members');check(collapsed(findGroup('空洞骑士')),'refreshed collection groups start collapsed');
-    chooseGroup('空洞骑士');cb('生成合集变更预览').click();await wait();optionalCheck().checked=true;optionalCheck().dispatchEvent(new Event('change'));check(cb('确认创建并导入 / 追加').disabled,'changing optional view checks invalidates preview');cb('生成合集变更预览').click();await wait();check(cu().textContent.includes('逐视频详情检查：开启'),'preview exposes enabled validation mode');check(cu().querySelector('.preview').textContent.includes('追加到已有合集'),'existing collection preview names exact target');cb('确认创建并导入 / 追加').click();await wait();check(collectionPosts.length===4&&seasons.get(50).episodes.length===1,'existing collection appends new video without another create');check(collectionRequests.filter(r=>r==='manuscript').length===1,'enabled optional mode uses the full view check');
-    cb('关闭').click();check(!collectionLayer,'collection dialog closes cleanly');openCollectionManager();await wait();check(!optionalCheck().checked,'reopening resets optional checks to off');check(cu().querySelectorAll('.collection-group').length===0&&collectionPosts.length===4,'reopening after success is read-only with no stale actionable groups');
+    reviewButton('返回编辑').click();cb('重新读取投稿与合集').click();await wait();check(cu().querySelectorAll('.collection-group').length===1&&cu().textContent.includes('2 份已在合集'),'collection refresh excludes all existing members');check(collapsed(findGroup('空洞骑士')),'refreshed collection groups start collapsed');
+    chooseGroup('空洞骑士');cb('生成合集变更预览').click();await wait();reviewButton('返回编辑').click();optionalCheck().checked=true;optionalCheck().dispatchEvent(new Event('change'));check(cb('确认创建并导入 / 追加').disabled,'changing optional view checks invalidates preview');cb('生成合集变更预览').click();await wait();check(cu().textContent.includes('逐视频详情检查：开启'),'preview exposes enabled validation mode');check(cu().querySelector('.preview').textContent.includes('追加到已有合集'),'existing collection preview names exact target');cb('确认创建并导入 / 追加').click();await wait();check(collectionPosts.length===4&&seasons.get(50).episodes.length===1,'existing collection appends new video without another create');check(collectionRequests.filter(r=>r==='manuscript').length===1,'enabled optional mode uses the full view check');
+    reviewButton('返回编辑').click();cb('关闭').click();check(!collectionLayer,'collection dialog closes cleanly');openCollectionManager();await wait();check(!optionalCheck().checked,'reopening resets optional checks to off');check(cu().querySelectorAll('.collection-group').length===0&&collectionPosts.length===4,'reopening after success is read-only with no stale actionable groups');
     cu().querySelector('dialog').dispatchEvent(new Event('cancel',{cancelable:true}));check(!collectionLayer,'Escape dismissal cleans up collection dialog');
+    // Interrupted and recovery flows use the same isolated fixture, never a live account.
+    const resetCollections=()=>{window.testLedger={version:1,tasks:{}};seasons.clear();seasons.set(50,makeSeason(50,'星露谷物语'));collectionPosts.length=0;collectionRequests.length=0;collectionHook=null;for(const d of Object.values(collectionRemotes))d.archive.season_id=0;};
+    const appendReview=async()=>{openCollectionManager();await wait();chooseGroup('星露谷物语');cb('生成合集变更预览').click();await wait();};
+    const closeCollection=()=>{if(reviewDialog().open)reviewButton('返回编辑').click();cb('关闭').click();};
+    resetCollections();await appendReview();
+    let releaseStop;const stopGate=new Promise(resolve=>releaseStop=resolve);collectionHook=async route=>{if(route==='addCollectionEpisodes')await stopGate;};
+    cb('确认创建并导入 / 追加').click();await collectionUntil(()=>collectionPosts.length===1);reviewDialog().dispatchEvent(new Event('cancel',{cancelable:true}));
+    check(reviewDialog().open&&active&&reviewDialog().textContent.includes('当前请求无法撤销'),'Escape during submission requests stop and keeps progress visible');
+    releaseStop();await wait();collectionHook=null;
+    check(collectionPosts.length===1&&cu().querySelector('[data-job=av101]').dataset.state==='done'&&cu().querySelector('[data-job=av102]').dataset.state==='stopped','stop waits for in-flight add, verifies it and marks unsent videos stopped');
+    reviewButton('返回编辑').click();cb('查看变更与状态').click();check(cu().activeElement===reviewButton('返回编辑')&&cu().querySelectorAll('.review-video').length===2,'reopened result modal focuses its back control without duplicating rows');
+    reviewButton('返回编辑').click();check(cu().activeElement===cb('查看变更与状态'),'closing a reopened review restores the matching trigger');cb('查看变更与状态').click();
+    cb('确认创建并导入 / 追加').click();await wait();check(collectionPosts.length===2&&cu().querySelectorAll('.review-video[data-state=done]').length===2,'retry after stop adds only the unsent remainder');closeCollection();
+
+    resetCollections();await appendReview();collectionHook=route=>route==='addCollectionEpisodes'?{http:200,json:{code:-400,message:'合成拒绝原因'}}:undefined;
+    cb('确认创建并导入 / 追加').click();await wait();check(cu().querySelector('[data-job=av101]').dataset.state==='failed'&&cu().querySelector('[data-job=av101]').textContent.includes('合成拒绝原因')&&cu().querySelector('[data-job=av102]').dataset.state==='stopped','explicit rejection shows a failed row and its reason and stops subsequent videos');
+    collectionHook=null;cb('确认创建并导入 / 追加').click();await wait();check(collectionPosts.length===3&&cu().querySelectorAll('.review-video[data-state=done]').length===2,'explicitly rejected item can be retried without duplicate result rows');closeCollection();
+
+    resetCollections();await appendReview();collectionHook=route=>{if(route==='addCollectionEpisodes')throw new Error('合成连接中断');};
+    cb('确认创建并导入 / 追加').click();await wait();check(cu().querySelector('[data-job=av101]').dataset.state==='unknown'&&cu().querySelector('[data-job=av101]').textContent.includes('禁止重发'),'uncertain write is marked unknown rather than done or retryable');
+    collectionHook=null;reviewButton('只核对未完成结果').click();await wait();check(collectionPosts.length===1&&cu().querySelector('[data-job=av101]').dataset.state==='unknown','check-only recovery leaves unresolved video unknown and never resends');
+    // A late result still belongs to the original target, even after editing a new target.
+    const originalSeason=seasons.get(50);originalSeason.episodes.push({aid:101,cid:1101,seasonId:50,sectionId:1050});originalSeason.sections.sections[0].epCount=1;
+    reviewButton('返回编辑').click();const retarget=findGroup('星露谷物语');retarget.querySelector('select').value='';retarget.querySelector('select').dispatchEvent(new Event('change'));const retitle=retarget.querySelector('input:not([type=checkbox])');retitle.value='不同的新合集';retitle.dispatchEvent(new Event('input'));cb('生成合集变更预览').click();await wait();cb('确认创建并导入 / 追加').click();await wait();
+    check(collectionPosts.length===1&&cu().querySelector('[data-job=av101]').dataset.state==='done'&&cu().querySelector('[data-job=av101]').textContent.includes('核对原目标：合集 50 · 章节 1050'),'reconciled old-target result names its original destination in a renamed new-collection preview');
+    check(cu().querySelector('[data-job=av102]').dataset.state==='pending'&&cu().querySelector('[data-job=av102]').textContent.includes('尚未发送'),'unattempted videos are not falsely marked done when an older pending intent takes priority');closeCollection();
+
+    resetCollections();await appendReview();collectionHook=route=>route==='collectionDetail'?{http:200,json:{code:-400,message:'合成回读失败'}}:undefined;
+    cb('确认创建并导入 / 追加').click();await wait();check(collectionPosts.length===2&&cu().querySelectorAll('.review-video[data-state=pending]').length===2&&cu().querySelector('[data-job=av101]').textContent.includes('回读未完成'),'failed final verification preserves accepted pending rows with actionable details');
+    closeCollection();collectionHook=null;openCollectionManager();await wait();cb('只核对未完成结果').click();await wait();check(reviewDialog().open&&cb('确认创建并导入 / 追加').disabled&&cu().querySelectorAll('.review-video[data-state=done]').length===2&&collectionPosts.length===2,'reopened check-only results use a dedicated modal and never enable mutation without a preview');reviewButton('返回编辑').click();check(cu().activeElement===cb('只核对未完成结果'),'check-only modal restores focus to its own trigger');closeCollection();
+
+    resetCollections();await appendReview();collectionHook=route=>route==='nav'?{http:200,json:{code:-400,message:'合成账号不可用'}}:undefined;
+    cb('确认创建并导入 / 追加').click();await wait();check(collectionPosts.length===0&&reviewDialog().textContent.includes('合成账号不可用')&&cu().querySelectorAll('.review-video[data-state=pending]').length===2,'preflight failure keeps unsent rows pending and reports the blocker');collectionHook=null;closeCollection();
+
+    resetCollections();seasons.clear();await appendReview();collectionHook=route=>route==='createCollection'?{http:200,json:{code:-400,message:'合成创建拒绝'}}:undefined;
+    cb('确认创建并导入 / 追加').click();await wait();check(collectionPosts.length===1&&cu().querySelector('.review-target .job-badge').dataset.state==='failed'&&cu().querySelectorAll('.review-video[data-state=stopped]').length===2,'failed collection creation has one group error and marks all unattempted videos stopped');collectionHook=null;closeCollection();
+    resetCollections();await appendReview();location.hash='';cancelCollection();check(!collectionLayer,'navigation cleanup closes both collection dialogs');
     location.hash='';
 
     const report=document.createElement('pre');report.id='ui-test-result';report.textContent=JSON.stringify({passed:true,checks:results},null,2);document.body.append(report);

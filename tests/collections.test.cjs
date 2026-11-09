@@ -462,3 +462,53 @@ test('preflight partial reads abort before all writes and cannot seed a later ex
  const f=fixture();f.addSeason(10,'已有合集',[100,101]);const p=await directPlan(f,'existing',['1','2']);f.options.onRequest=(route,p)=>route==='collectionSection'&&p.id==='101'?{http:200,json:{code:-400,message:'章节读取失败'}}:undefined;
  await f.manager.execute(p.token,{confirmed:true});assert.equal(f.posts().length,0);f.options.onRequest=undefined;const before=f.calls.length;await f.manager.execute(p.token,{confirmed:true});assert.equal(f.posts().length,2);assert.equal(countRoutes(f.calls.slice(before)).collectionSection,4);
 });
+
+test('review display keeps accepted and uncertain writes distinct from confirmed done',()=>{
+ const display=state=>C.collectionJobDisplay({state});
+ assert.equal(display('ready').state,'pending');assert.equal(display('sending').state,'submitting');
+ assert.equal(display('accepted').state,'pending');assert.equal(display('unknown').state,'unknown');
+ for(const state of ['verified','unchanged'])assert.equal(display(state).state,'done');
+ for(const state of ['failed','rejected','conflict'])assert.equal(display(state).state,'failed');
+ assert.equal(display('cancelled').state,'stopped');
+ assert.equal(C.collectionJobDisplay({state:'accepted',phase:'checking'}).state,'checking');
+ assert.equal(C.collectionJobDisplay({state:'ready',phase:'preparing'}).state,'pending');
+});
+test('progress reports each pending, sending and final-check phase without altering durable states or read counts',async()=>{
+ const f=fixture(),p=await directPlan(f,'existing',['1','2','3']),events=[],before=f.calls.length;
+ const r=await f.manager.execute(p.token,{confirmed:true,progress:job=>{
+  events.push({...clone(job),posts:f.posts().length});
+  if(job.state==='sending')assert.equal(f.store().collectionJobs.imports[job.aid].state,'sending');
+  if(job.phase==='checking')assert.equal(f.posts().length,3);
+  job.state='tampered';
+ }});
+ for(const aid of ['1','2','3']){
+  const jobs=events.filter(job=>job.aid===aid);assert.deepEqual(jobs.map(job=>job.phase||job.state),['preparing','sending','accepted','checking','verified']);
+  assert.equal(jobs.find(job=>job.state==='sending').posts,Number(aid)-1);
+  assert.equal(f.store().collectionJobs.imports[aid].state,'verified');assert.equal(f.store().collectionJobs.imports[aid].phase,undefined);
+ }
+ assert.equal(r.length,6);assert.equal(countRoutes(f.calls.slice(before)).collectionSection,2);
+});
+test('creation submitting progress and callback errors cannot change a batch outcome',async()=>{
+ const f=fixture(),p=await directPlan(f,'new',['1','2']),events=[];
+ await f.manager.execute(p.token,{confirmed:true,progress:job=>{events.push(clone(job));throw new Error('broken UI');}});
+ assert(events.some(job=>!job.aid&&job.state==='sending'));assert.equal(f.posts().length,3);
+ assert(Object.values(f.store().collectionJobs.imports).every(job=>job.state==='verified'));
+});
+test('check-only progress uses original targets and transient phases and cannot overlap another execution',async()=>{
+ const f=fixture({noAddApply:true}),p=await directPlan(f,'existing',['1']);await f.manager.execute(p.token,{confirmed:true});
+ let release,entered=false;const gate=new Promise(resolve=>release=resolve),events=[];
+ f.options.onRequest=async route=>{if(route==='collectionDetail'){entered=true;await gate;}};
+ const pending=f.manager.checkPending(job=>events.push(clone(job)));
+ while(!entered)await new Promise(r=>setImmediate(r));
+ await assert.rejects(()=>f.manager.execute(p.token,{confirmed:true}),/运行/);await assert.rejects(()=>f.manager.checkPending(),/运行/);
+ release();await pending;assert.equal(f.manager.running,false);assert.deepEqual(events.map(job=>job.phase||job.state),['checking','accepted']);assert(events.every(job=>job.seasonId==='10'));assert.equal(f.posts().length,1);
+ f.options.onRequest=route=>route==='nav'?{http:200,json:{code:-400,message:'unavailable'}}:undefined;
+ await assert.rejects(()=>f.manager.checkPending());assert.equal(f.manager.running,false);
+});
+test('stop from the submitting progress callback prevents the not-yet-sent write',async()=>{
+ for(const target of ['new','existing']){
+  const f=fixture(),p=await directPlan(f,target,['1','2']);
+  const r=await f.manager.execute(p.token,{confirmed:true,progress:job=>{if(job.state==='sending')f.manager.stop();}});
+  assert.equal(f.posts().length,0);assert(r.some(job=>job.state==='cancelled'));
+ }
+});
